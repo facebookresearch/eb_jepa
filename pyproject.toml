@@ -1,0 +1,47 @@
+[project]
+name = "eb-jepa"
+version = "0.1.1"
+description = "Energy-Based JEPA"
+authors = [{name = "Yann LeCun", email = "ylecun@meta.com"}, {name = "Amir Bar", email = "amirbar@meta.com"}, {name= "Koustuv Sinha", email="koustuvs@meta.com"}]
+dependencies = [
+    "einops>=0.8.1",
+    "fire>=0.7.0",
+    "huggingface-hub>=0.33.2",
+    "matplotlib>=3.10.3",
+    "opencv-python>=4.12.0.88",
+    "pudb>=2025.1",
+    "scikit-learn>=1.7.0",
+    "tiktoken>=0.9.0",
+    "torch==2.7.1",
+    "torchcodec>=0.4.0",
+    "torchvision>=0.22.1",
+    "wandb>=0.21.1",
+    "gymnasium>=1.1.1",
+    "imageio",
+    "seaborn",
+    "submitit",
+    "tqdm",
+    "pymunk",
+    "decord",
+    "omegaconf",
+    "ruamel.yaml",
+]
+requires-python = "==3.12.*"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["eb_jepa*"]
+
+[tool.isort]
+profile = "black"
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "isort>=6.0.1",
+    "pytest>=8.4.1",
+]
