@@ -3,13 +3,13 @@
 ## Train Different JEPA models and examples
 
 ### Image examples
-1.  Train an encoder representation from unlabeled images (Amir)
-2.  Attention based architectures (David, Peter)
+1.  Train an encoder representation from unlabeled images
+2.  Attention based architectures
 
 ### Video examples
-4.  Train a predictive JEPA from unlabeled video, simulate dynamics (Amir)
-5.  Train a model from action condition videos, plan on the world model latent space (Basile, Kevin)
-6.  Given a JEPA World Model, use MPC to plan (Kathy)
+4.  Train a predictive JEPA from unlabeled video, simulate dynamics
+5.  Train a model from action condition videos, plan on the world model latent space
+6.  Given a JEPA World Model, use MPC to plan
 
 
 
