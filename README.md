@@ -25,7 +25,14 @@ Prediction targets:
 
 ### Action Conditioned Video JEPA on Two Rooms
 
-In this toy setting, a world model is trained given:
+This example demonstrates a Joint Embedding Predictive Architecture (JEPA) for action-conditioned world modeling in the Two Rooms environment. The model learns to predict future states based on current observations and actions. These representations enable planning towards a goal observation embedding.
+
+| Planning Episode | Task Definition |
+|------------------|-----------------|
+| <img src="assets/top_randw_agent_steps_succ.gif" alt="Successful planning episode" width="155" /> | <img src="assets/top_randw_state.png" alt="Episode task definition" width="300" /> |
+| *Successful planning episode* | *Episode task definition: from init to goal state* |
+
+The world model is trained given:
 
 - image representation (or a sequence)
 - action
