@@ -29,7 +29,7 @@ This example demonstrates a Joint Embedding Predictive Architecture (JEPA) for a
 
 | Planning Episode | Task Definition |
 |------------------|-----------------|
-| <img src="assets/top_randw_agent_steps_succ.gif" alt="Successful planning episode" width="155" /> | <img src="assets/top_randw_state.png" alt="Episode task definition" width="300" /> |
+| <img src="examples/ac_video_jepa/assets/top_randw_agent_steps_succ.gif" alt="Successful planning episode" width="155" /> | <img src="examples/ac_video_jepa/assets/top_randw_state.png" alt="Episode task definition" width="300" /> |
 | *Successful planning episode* | *Episode task definition: from init to goal state* |
 
 The world model is trained given:
