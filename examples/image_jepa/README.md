@@ -7,7 +7,7 @@ This example demonstrates how to train a Joint Embedding Predictive Architecture
 ## Features
 
 - **Image-only training**: Training from unlabeled image data
-- **Representation learning**: Learns meaningful representations through self-supervised learning, avoids collapse using Variance-Covariance Regularization.
+- **Representation learning**: Learns meaningful representations through self-supervised learning, avoids collapse using Variance-Covariance or LeJEPA (SIGReg) Regularization.
 - **Linear probing evaluation**: Evaluates learned representations using a linear classifier
 
 
@@ -21,24 +21,47 @@ The Image JEPA consists of:
 
 ## Usage
 
-### Basic Training
+### Training Configurations
 
-```bash
-python main.py
-```
-
-### Custom Parameters
+#### 1. ResNet + VICReg Loss
 
 ```bash
 python main.py \
-    --batch_size=32 \
-    --epochs=50 \
-    --lr=1e-3 \
-    --henc=64 \
-    --dstc=32 \
-    --probe_epochs=30 \
-    --probe_lr=1e-2
+    --model_type resnet \
+    --loss_type vicreg \
+    --sim_loss_weight 25.0 \
+    --var_loss_weight 25.0 \
+    --cov_loss_weight 1.0 \
+    --batch_size 256 \
+    --epochs 300
 ```
+
+#### 2. ResNet + LE-JEPA (BCS) Loss
+
+```bash
+python main.py \
+    --model_type resnet \
+    --loss_type bcs \
+    --lmbd 10.0 \
+    --batch_size 256 \
+    --epochs 300
+```
+
+#### 3. Vision Transformer + VICReg Loss
+
+```bash
+python main.py \
+    --model_type vit_s \
+    --patch_size 2 \
+    --loss_type vicreg \
+    --sim_loss_weight 25.0 \
+    --var_loss_weight 25.0 \
+    --cov_loss_weight 1.0 \
+    --batch_size 256 \
+    --epochs 300
+```
+
+For ViT-Base, use `--model_type vit_b` instead of `vit_s`.
 
 ### Parameters
 
@@ -73,20 +96,3 @@ The model is evaluated using linear probing:
 - The model should learn meaningful representations that enable good linear probe performance
 - VC loss should prevent representation collapse
 - Linear probe accuracy should improve with better learned representations
-
-## Implementation Details
-
-### ImageOnlyDataset
-- Extracts individual frames from the Moving MNIST video dataset
-- Each frame becomes a separate training sample
-- Preserves digit location information for evaluation
-
-### ImageJEPA
-- Simplified JEPA architecture for image-only processing
-- Uses reconstruction as the prediction task
-- Applies VC loss to prevent representation collapse
-
-### LinearProbe
-- Frozen encoder with trainable linear classifier
-- Evaluates learned representations on digit classification
-- Uses binary classification (digit present/absent)
