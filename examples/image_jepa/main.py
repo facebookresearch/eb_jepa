@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
 """
 CIFAR-10 VICReg Training Script - Native PyTorch Implementation
 
 This script implements VICReg training on CIFAR-10 dataset using only PyTorch and torchvision.
+Supports both ResNet and Vision Transformer (ViT) backbones.
 """
 
 import os
@@ -17,17 +17,22 @@ import torchvision
 import torchvision.transforms as transforms
 from torchvision.datasets import CIFAR10
 from torch.optim.optimizer import required
+from torchvision.models import VisionTransformer
 import wandb
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
+
+from eb_jepa.losses import VICRegLoss, BCS
+from dataset import get_train_transforms, get_val_transforms, ImageDataset
+from eval import LinearProbe, evaluate_linear_probe
 
 
 class ResNet18(nn.Module):
     """ResNet-18 backbone implementation."""
     
-    def __init__(self, num_classes=10):
+    def __init__(self):
         super().__init__()
-        self.backbone = torchvision.models.resnet18(pretrained=False)
+        self.backbone = torchvision.models.resnet18()
         self.backbone.fc = nn.Identity()  # Remove final classification layer
         self.backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
         self.backbone.maxpool = nn.Identity()
@@ -38,17 +43,17 @@ class ResNet18(nn.Module):
         return self.backbone(x)
 
 
-class VICReg(nn.Module):
-    """VICReg model implementation."""
+class ImageSSL(nn.Module):
+    """Image Self-Supervised Learning model implementation."""
     
-    def __init__(self, backbone, proj_hidden_dim=2048, proj_output_dim=2048):
+    def __init__(self, backbone, features_dim, proj_hidden_dim=2048, proj_output_dim=2048):
         super().__init__()
         self.backbone = backbone
-        self.features_dim = backbone.features_dim
+        self.features_dim = features_dim
         
         # Projector
         self.projector = nn.Sequential(
-            nn.Linear(self.features_dim, proj_hidden_dim),
+            nn.Linear(features_dim, proj_hidden_dim),
             nn.BatchNorm1d(proj_hidden_dim),
             nn.ReLU(),
             nn.Linear(proj_hidden_dim, proj_hidden_dim),
@@ -63,140 +68,8 @@ class VICReg(nn.Module):
         return features, projections
 
 
-def vicreg_loss(z1, z2, sim_loss_weight=25.0, var_loss_weight=25.0, cov_loss_weight=1.0):
-    """VICReg loss function."""
-    batch_size = z1.size(0)
-    
-    # Invariance loss (similarity)
-    sim_loss = F.mse_loss(z1, z2)
-    
-    # Variance loss
-    z1_std = torch.sqrt(z1.var(dim=0) + 1e-4)
-    z2_std = torch.sqrt(z2.var(dim=0) + 1e-4)
-    var_loss = torch.mean(F.relu(1 - z1_std)) + torch.mean(F.relu(1 - z2_std))
-    
-    # Covariance loss
-    z1_centered = z1 - z1.mean(dim=0)
-    z2_centered = z2 - z2.mean(dim=0)
-    z1_cov = torch.mm(z1_centered.T, z1_centered) / (batch_size - 1)
-    z2_cov = torch.mm(z2_centered.T, z2_centered) / (batch_size - 1)
-    
-    cov_loss = (z1_cov.pow(2).sum() - z1_cov.diagonal().pow(2).sum()) / z1_cov.size(0) + \
-               (z2_cov.pow(2).sum() - z2_cov.diagonal().pow(2).sum()) / z2_cov.size(0)
-    
-    total_loss = sim_loss_weight * sim_loss + var_loss_weight * var_loss + cov_loss_weight * cov_loss
-    
-    return total_loss, sim_loss, var_loss, cov_loss
-
-
-class RandomResizedCrop:
-    """Random resized crop augmentation."""
-    
-    def __init__(self, size, scale=(0.2, 1.0)):
-        self.size = size
-        self.scale = scale
-        
-    def __call__(self, img):
-        return transforms.RandomResizedCrop(self.size, scale=self.scale)(img)
-
-
-class ColorJitter:
-    """Color jitter augmentation."""
-    
-    def __init__(self, brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, prob=0.8):
-        self.transform = transforms.ColorJitter(brightness, contrast, saturation, hue)
-        self.prob = prob
-        
-    def __call__(self, img):
-        if torch.rand(1) < self.prob:
-            return self.transform(img)
-        return img
-
-
-class Grayscale:
-    """Grayscale augmentation."""
-    
-    def __init__(self, prob=0.2):
-        self.prob = prob
-        
-    def __call__(self, img):
-        if torch.rand(1) < self.prob:
-            return transforms.Grayscale(num_output_channels=3)(img)
-        return img
-
-
-class Solarization:
-    """Solarization augmentation."""
-    
-    def __init__(self, prob=0.1):
-        self.prob = prob
-        
-    def __call__(self, img):
-        if torch.rand(1) < self.prob:
-            img = transforms.functional.solarize(img, threshold=128)
-        return img
-
-
-class HorizontalFlip:
-    """Horizontal flip augmentation."""
-    
-    def __init__(self, prob=0.5):
-        self.prob = prob
-        
-    def __call__(self, img):
-        if torch.rand(1) < self.prob:
-            return transforms.functional.hflip(img)
-        return img
-
-
-def get_augmentations():
-    """Get training augmentations for VICReg (same as original solo-learn)."""
-    # Single augmentation pipeline that will be applied multiple times
-    # This matches the original solo-learn implementation exactly
-    transform = transforms.Compose([
-        RandomResizedCrop(32, scale=(0.2, 1.0)),
-        ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1, prob=0.8),
-        Grayscale(prob=0.2),
-        Solarization(prob=0.1),
-        HorizontalFlip(prob=0.5),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
-    
-    return transform
-
-
-def get_val_transforms():
-    """Get validation transforms."""
-    return transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
-
-
-class VICRegDataset(torch.utils.data.Dataset):
-    """Custom dataset for VICReg that applies the same augmentation multiple times."""
-    
-    def __init__(self, dataset, transform, num_crops=2):
-        self.dataset = dataset
-        self.transform = transform
-        self.num_crops = num_crops
-        
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        image, label = self.dataset[idx]
-        
-        # Apply the same transformation multiple times to create different views
-        # This matches the NCropAugmentation behavior from solo-learn
-        views = [self.transform(image) for _ in range(self.num_crops)]
-        
-        return views, label
-
-
 class LARS(optim.Optimizer):
-    """LARS optimizer implementation - identical to solo-learn."""
+    """LARS optimizer implementation."""
     
     def __init__(
         self,
@@ -299,7 +172,7 @@ class LARS(optim.Optimizer):
 
 
 class WarmupCosineScheduler:
-    """Warmup cosine learning rate scheduler - consistent with solo-learn implementation."""
+    """Warmup cosine learning rate scheduler"""
     
     def __init__(self, optimizer, warmup_epochs, max_epochs, base_lr, min_lr=0.0, warmup_start_lr=3e-5):
         self.optimizer = optimizer
@@ -311,138 +184,57 @@ class WarmupCosineScheduler:
         
     def step(self, epoch):
         if epoch < self.warmup_epochs:
-            # Linear warmup: warmup_start_lr -> base_lr (consistent with solo-learn)
             lr = self.warmup_start_lr + epoch * (self.base_lr - self.warmup_start_lr) / (self.warmup_epochs - 1)
         else:
-            # Cosine annealing: base_lr -> min_lr (consistent with solo-learn)
             lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + torch.cos(torch.tensor((epoch - self.warmup_epochs) / (self.max_epochs - self.warmup_epochs) * 3.14159)))
         
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
 
 
-class LinearProbe(nn.Module):
-    """Linear probe classifier for evaluating representations."""
-    
-    def __init__(self, feature_dim, num_classes):
-        super().__init__()
-        self.classifier = nn.Linear(feature_dim, num_classes)
-        
-    def forward(self, x):
-        return self.classifier(x)
-
-
-def extract_features(model, dataloader, device):
-    """Extract features from the model for all samples in the dataloader."""
-    model.eval()
-    features = []
-    labels = []
-    
-    with torch.no_grad():
-        for data, target in tqdm(dataloader, desc="Extracting features"):
-            data = data.to(device)
-            target = target.to(device)
-            
-            # Extract features (not projections)
-            feat, _ = model(data)
-            features.append(feat.cpu())
-            labels.append(target.cpu())
-    
-    features = torch.cat(features, dim=0)
-    labels = torch.cat(labels, dim=0)
-    
-    return features, labels
-
-def evaluate_linear_probe(model, linear_probe, val_loader, device):
-    """Evaluate linear probe on validation set."""
-    model.eval()
-    linear_probe.eval()
-    
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for data, target in val_loader:
-            data = data.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-            
-            # Mixed precision forward pass
-            with autocast():
-                # Extract features
-                features, _ = model(data)
-            
-            # Forward pass through linear probe (NOT under autocast)
-            # Convert features to float32 to match linear probe dtype
-            outputs = linear_probe(features.float())
-            loss = F.cross_entropy(outputs, target)
-            
-            total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += target.size(0)
-            correct += predicted.eq(target).sum().item()
-    
-    accuracy = 100.0 * correct / total
-    avg_loss = total_loss / len(val_loader)
-    
-    return accuracy, avg_loss
-
-
-def train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler, device, epoch, sim_loss_weight=25.0, var_loss_weight=25.0, cov_loss_weight=1.0):
+def train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler, device, epoch, loss_fn, use_amp=True):
     """Train for one epoch."""
     model.train()
     linear_probe.train()
     
-    total_loss = 0
-    total_sim_loss = 0
-    total_var_loss = 0
-    total_cov_loss = 0
+    # Dynamic loss accumulator
+    loss_totals = {}
     total_linear_loss = 0
     linear_correct = 0
     linear_total = 0
     
     pbar = tqdm(train_loader, desc=f'Epoch {epoch}')
     for batch_idx, (views, target) in enumerate(pbar):
-        # views is a list of tensors, extract the two views
         view1, view2 = views[0].to(device, non_blocking=True), views[1].to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-        
-        # Mixed precision forward pass
-        with autocast():
-            # Forward pass for VICReg
+
+        with autocast('cuda', enabled=use_amp):
             features, z1 = model(view1)
-            _, z2 = model(view2)
-            
-            # Compute VICReg loss
-            vc_loss, sim_loss, var_loss, cov_loss = vicreg_loss(z1, z2, sim_loss_weight, var_loss_weight, cov_loss_weight)
+            _, z2 = model(view2)          
+            loss_dict = loss_fn(z1, z2)
+            loss = loss_dict["loss"]
         
-        # Linear probe training (frozen encoder) - NOT under autocast in Lightning
         with torch.no_grad():
-            # Extract features without gradients and convert to float32
             features_frozen = features.detach().float()
         
-        # Forward pass for linear probe (NOT under autocast in Lightning)
         linear_outputs = linear_probe(features_frozen)
         linear_loss = F.cross_entropy(linear_outputs, target)
         
-        # Accuracy computation (NOT under autocast in Lightning)
         _, predicted = linear_outputs.max(1)
         linear_correct_batch = predicted.eq(target).sum().item()
         
-        # Combined loss
-        total_loss_batch = vc_loss + linear_loss
+        total_loss_batch = loss + linear_loss
         
-        # Mixed precision backward pass
         optimizer.zero_grad()
         scaler.scale(total_loss_batch).backward()
         scaler.step(optimizer)
         scaler.update()
         
-        # Update metrics
-        total_loss += vc_loss.item()
-        total_sim_loss += sim_loss.item()
-        total_var_loss += var_loss.item()
-        total_cov_loss += cov_loss.item()
+        # Update metrics dynamically based on loss_dict keys
+        for key, value in loss_dict.items():
+            if key not in loss_totals:
+                loss_totals[key] = 0
+            loss_totals[key] += value.item()
         total_linear_loss += linear_loss.item()
         
         # Update linear probe accuracy (pre-computed under autocast)
@@ -451,7 +243,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler,
         
         # Update progress bar
         pbar.set_postfix({
-            'VICReg': f'{vc_loss.item():.4f}',
+            'Loss': f'{loss.item():.4f}',
             'Linear': f'{linear_loss.item():.4f}',
             'Acc': f'{100.*linear_correct/linear_total:.2f}%'
         })
@@ -459,19 +251,21 @@ def train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler,
     # Update learning rate
     scheduler.step(epoch)
     
-    return {
-        'loss': total_loss / len(train_loader),
-        'sim_loss': total_sim_loss / len(train_loader),
-        'var_loss': total_var_loss / len(train_loader),
-        'cov_loss': total_cov_loss / len(train_loader),
-        'linear_loss': total_linear_loss / len(train_loader),
-        'linear_acc': 100.0 * linear_correct / linear_total
-    }
+    # Build return dict dynamically
+    num_batches = len(train_loader)
+    metrics = {key: total / num_batches for key, total in loss_totals.items()}
+    metrics['linear_loss'] = total_linear_loss / num_batches
+    metrics['linear_acc'] = 100.0 * linear_correct / linear_total
+    
+    return metrics
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='VICReg Training on CIFAR-10')
+def create_base_parser(description='Image SSL Training on CIFAR-10'):
+    """Create base argument parser with common arguments.
+    
+    This can be extended by other scripts to add their own arguments.
+    """
+    parser = argparse.ArgumentParser(description=description)
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
@@ -482,28 +276,42 @@ def parse_args():
     parser.add_argument('--warmup_start_lr', type=float, default=3e-5, help='Starting learning rate for warmup')
     
     # Model parameters
+    parser.add_argument('--model_type', type=str, choices=['resnet', 'vit_s', 'vit_b'], default='resnet', help='Type of encoder')
+    parser.add_argument('--patch_size', type=int, default=2, help='Patch size for ViT')
     parser.add_argument('--proj_hidden_dim', type=int, default=2048, help='Projector hidden dimension')
     parser.add_argument('--proj_output_dim', type=int, default=2048, help='Projector output dimension')
     parser.add_argument('--use_projector', type=int, default=1, help='Whether to use projector (default: True)')
-    
-    # Loss weights
-    parser.add_argument('--sim_loss_weight', type=float, default=25.0, help='Similarity loss weight')
-    parser.add_argument('--var_loss_weight', type=float, default=25.0, help='Variance loss weight')
-    parser.add_argument('--cov_loss_weight', type=float, default=1.0, help='Covariance loss weight')
     
     # Data parameters
     parser.add_argument('--num_workers', type=int, default=4, help='Number of data loader workers')
     parser.add_argument('--data_dir', type=str, default='./datasets', help='Directory to store datasets')
     
     # Logging parameters
-    parser.add_argument('--project_name', type=str, default='solo-learn', help='Wandb project name')
-    parser.add_argument('--run_name', type=str, default='vicreg-cifar10-scratch', help='Wandb run name')
+    parser.add_argument('--project_name', type=str, default='eb-jepa-image-ssl', help='Wandb project name')
     parser.add_argument('--log_interval', type=int, default=10, help='Logging interval in epochs')
     parser.add_argument('--save_interval', type=int, default=50, help='Checkpoint saving interval in epochs')
     
     # Other parameters
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='auto', help='Device to use (auto, cuda, cpu)')
+    parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision training (enabled by default)')
+    
+    return parser
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = create_base_parser()
+    
+    # Loss function selection
+    parser.add_argument('--loss_type', type=str, choices=['vicreg', 'bcs'], default='vicreg', help='Loss function type')
+    
+    # VICReg-specific loss weights
+    parser.add_argument('--var_loss_weight', type=float, default=1.0, help='Variance loss weight (VICReg)')
+    parser.add_argument('--cov_loss_weight', type=float, default=80.0, help='Covariance loss weight (VICReg)')
+    
+    # BCS-specific loss weight
+    parser.add_argument('--lmbd', type=float, default=10.0, help='BCS loss weight (LE-JEPA)')
     
     return parser.parse_args()
 
@@ -524,19 +332,15 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
     
-    # Initialize wandb
     wandb.init(
         project=args.project_name,
         config=vars(args),
-        name=args.run_name
+        name=f'{args.model_type}-{args.loss_type}-{args.seed}'
     )
     
-    # Load datasets
     print("Loading CIFAR-10 dataset...")
-    # Get single augmentation pipeline (same as original solo-learn)
-    transform = get_augmentations()
+    transform = get_train_transforms()
     
-    # Base dataset without transforms
     base_train_dataset = CIFAR10(
         root=args.data_dir,
         train=True,
@@ -544,8 +348,7 @@ def main():
         transform=None
     )
     
-    # Create VICReg dataset with multiple crops (same as NCropAugmentation)
-    train_dataset = VICRegDataset(base_train_dataset, transform, num_crops=2)
+    train_dataset = ImageDataset(base_train_dataset, transform, num_crops=2)
     
     val_dataset = CIFAR10(
         root=args.data_dir,
@@ -572,34 +375,44 @@ def main():
     
     # Initialize model
     print("Initializing model...")
-    backbone = ResNet18(num_classes=10)
-    
-    if args.use_projector:
-        model = VICReg(backbone, proj_hidden_dim=args.proj_hidden_dim, proj_output_dim=args.proj_output_dim)
-    else:
-        # Use identity projector (no transformation)
-        model = VICReg(backbone, proj_hidden_dim=args.proj_hidden_dim, proj_output_dim=args.proj_output_dim)
+    if args.model_type == 'resnet':
+        backbone = ResNet18()
+        features_dim = backbone.features_dim
+    elif args.model_type == 'vit_s':
+        features_dim = 384
+        model_kwargs = dict(image_size=32, patch_size=8, hidden_dim=features_dim, num_layers=12, num_heads=6, mlp_dim=4*features_dim)
+        backbone = VisionTransformer(**model_kwargs)
+        backbone.heads = nn.Identity()
+    elif args.model_type == 'vit_b':
+        features_dim = 768
+        model_kwargs = dict(image_size=32, patch_size=8, hidden_dim=features_dim, num_layers=12, num_heads=12, mlp_dim=4*features_dim)
+        backbone = VisionTransformer(**model_kwargs)
+        backbone.heads = nn.Identity()
+
+    model = ImageSSL(backbone, features_dim=features_dim, proj_hidden_dim=args.proj_hidden_dim, proj_output_dim=args.proj_output_dim)
+
+    if not args.use_projector:
         model.projector = nn.Identity()
     
     model = model.to(device)
     
     # Initialize linear probe
-    linear_probe = LinearProbe(feature_dim=512, num_classes=10).to(device)
+    linear_probe = LinearProbe(feature_dim=features_dim, num_classes=10).to(device)
     
     # Initialize mixed precision scaler
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')
     
-    # Initialize optimizer with both model and linear probe parameters
+    
     optimizer = LARS(
         [
             {'params': model.parameters(), 'lr': 0.3},
-            {'params': linear_probe.parameters(), 'lr': 0.1}
+            {'params': linear_probe.parameters(), 'lr': 0.1} # Initialize linear probe parameters
         ],
         weight_decay=1e-4,
         eta=0.02,
         clip_lr=True,
-        exclude_bias_n_norm=True,  # Excludes 1D params from LARS scaling only
-        momentum=0.9  # Consistent with solo-learn default for LARS
+        exclude_bias_n_norm=True,
+        momentum=0.9
     )
     
     scheduler = WarmupCosineScheduler(
@@ -611,6 +424,15 @@ def main():
         warmup_start_lr=args.warmup_start_lr
     )
     
+    # Initialize loss function
+    if args.loss_type == 'vicreg':
+        loss_fn = VICRegLoss(
+            var_loss_weight=args.var_loss_weight,
+            cov_loss_weight=args.cov_loss_weight
+        )
+    elif args.loss_type == 'bcs':
+        loss_fn = BCS(lmbd=args.lmbd)
+    
     # Training loop
     print("Starting training...")
     start_time = time.time()
@@ -618,32 +440,26 @@ def main():
     for epoch in range(args.epochs):
         # Train
         train_metrics = train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler, device, epoch, 
-                                   args.sim_loss_weight, args.var_loss_weight, args.cov_loss_weight)
+                                   loss_fn, not args.no_amp)
         
         # Evaluate linear probe on validation set
-        val_acc, val_loss = evaluate_linear_probe(model, linear_probe, val_loader, device)
+        val_acc, val_loss = evaluate_linear_probe(model, linear_probe, val_loader, device, not args.no_amp)
         
-        # Log metrics
-        log_dict = {
-            'epoch': epoch,
-            'train_loss': train_metrics['loss'],
-            'train_sim_loss': train_metrics['sim_loss'],
-            'train_var_loss': train_metrics['var_loss'],
-            'train_cov_loss': train_metrics['cov_loss'],
-            'linear_train_loss': train_metrics['linear_loss'],
-            'linear_train_acc': train_metrics['linear_acc'],
-            'linear_val_loss': val_loss,
-            'linear_val_acc': val_acc,
-            'learning_rate': optimizer.param_groups[0]['lr']
-        }
+        # Log metrics - dynamically add train_ prefix to all train_metrics keys
+        log_dict = {'epoch': epoch}
+        for key, value in train_metrics.items():
+            log_dict[f'train_{key}'] = value
+        log_dict['val_loss'] = val_loss
+        log_dict['val_acc'] = val_acc
+        log_dict['learning_rate'] = optimizer.param_groups[0]['lr']
         
         wandb.log(log_dict)
         
         # Print progress
         if epoch % args.log_interval == 0:
             elapsed = time.time() - start_time
-            print(f'Epoch {epoch:4d} | VICReg: {train_metrics["loss"]:.4f} | '
-                  f'Linear Train: {train_metrics["linear_acc"]:.2f}% | '
+            metrics_str = ' | '.join(f'{k}: {v:.4f}' for k, v in train_metrics.items())
+            print(f'Epoch {epoch:4d} | {metrics_str} | '
                   f'Linear Val: {val_acc:.2f}% | '
                   f'LR: {optimizer.param_groups[0]["lr"]:.6f} | '
                   f'Time: {elapsed:.1f}s')
@@ -660,8 +476,8 @@ def main():
                 'loss': train_metrics['loss'],
                 'linear_val_acc': val_acc
             }
-            os.makedirs('trained_models/vicreg', exist_ok=True)
-            torch.save(checkpoint, f'trained_models/vicreg/checkpoint_epoch_{epoch}.pth')
+            os.makedirs('examples/image_jepa/trained_models/', exist_ok=True)
+            torch.save(checkpoint, f'examples/image_jepa/trained_models/checkpoint_epoch_{epoch}.pth')
     
     print("Training completed!")
     wandb.finish()

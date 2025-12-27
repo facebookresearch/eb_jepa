@@ -6,17 +6,17 @@ Examples include learning image (a), video (b), and action conidtioned video (c)
 
 Each example is (almost) self-contained and training takes up to few hours on a single GPU card.
 
-### Image Representations
+### [Image Representations](examples/image_jepa/README.md)
 
 This example demonstrates learning self-supervised representations from unlabeled images on CIFAR 10, and evaluated on image classification.
 ![Moving MNIST](examples/image_jepa/assets/arch_figure.png)
 
-### Predictive Video Representations
+### [Predictive Video Representations](examples/video_jepa/README.md)
 ![Moving MNIST](examples/video_jepa/assets/viz.png)
 
 A model is trained to predict the next image representation in a sequence
 
-### Action Conditioned Prediction and Planning
+### [Action Conditioned Prediction and Planning](examples/ac_video_jepa/README.md)
 
 This example demonstrates a Joint Embedding Predictive Architecture (JEPA) for action-conditioned world modeling in the Two Rooms environment. The model learns to predict future states based on current observations and actions. These representations enable planning towards a goal observation embedding.
 
@@ -27,7 +27,7 @@ This example demonstrates a Joint Embedding Predictive Architecture (JEPA) for a
 
 ## Installation
 
-We use [uv](https://docs.astral.sh/uv/guides/projects/) package manager to install and maintain packages. Once you have [installed uv](https://docs.astral.sh/uv/getting-started/installation/), run the following to create a new virtual environment.
+We use [uv](https://docs.astral.sh/uv/guides/projects/) package manager to install and maintain packages. Once you have [installed uv](pip install --upgrade uv/), run the following to create a new virtual environment.
 
 ```bash
 uv sync

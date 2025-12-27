@@ -106,9 +106,9 @@ The model is evaluated on:
 - **Detection Loss**: Performance on digit location prediction task
 - **Average Precision (AP)**: Quality of multi-step predictions
 
-## Visualization
+## Results
 
-### Results
+### Visualization
 
 *Visualization showing input frames, 1-step predictions visaulization, and full rollout, obtained via auto-regressive prediction, on Moving MNIST data.* 
 

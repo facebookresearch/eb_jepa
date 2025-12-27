@@ -7,7 +7,7 @@ This example demonstrates how to train a Joint Embedding Predictive Architecture
 ## Features
 
 - **Image-only training**: Training from unlabeled image data
-- **Representation learning**: Learns meaningful representations through self-supervised learning, avoids collapse using Variance-Covariance Regularization.
+- **Representation learning**: Learns meaningful representations through self-supervised learning, avoids collapse using Variance-Covariance or LeJEPA (SIGReg) Regularization.
 - **Linear probing evaluation**: Evaluates learned representations using a linear classifier
 
 
@@ -21,72 +21,59 @@ The Image JEPA consists of:
 
 ## Usage
 
-### Basic Training
+### Training Configurations
 
-```bash
-python main.py
-```
-
-### Custom Parameters
+#### 1. ResNet + VICReg Loss
 
 ```bash
 python main.py \
-    --batch_size=32 \
-    --epochs=50 \
-    --lr=1e-3 \
-    --henc=64 \
-    --dstc=32 \
-    --probe_epochs=30 \
-    --probe_lr=1e-2
+    --model_type resnet \
+    --loss_type vicreg \
+    --var_loss_weight 1.0 \
+    --cov_loss_weight 80.0 \
+    --batch_size 256 \
+    --epochs 300
 ```
 
-### Parameters
+#### 2. ResNet + LE-JEPA (SIGReg) Loss
 
-- `batch_size`: Batch size for training (default: 64)
-- `dobs`: Input channels (default: 1 for grayscale)
-- `henc`: Encoder hidden dimension (default: 32)
-- `hpre`: Predictor hidden dimension (default: 32)
-- `dstc`: Output dimension (default: 16)
-- `cov_coeff`: Covariance coefficient for VC loss (default: 100.0)
-- `std_coeff`: Standard deviation coefficient for VC loss (default: 10.0)
-- `epochs`: Number of training epochs (default: 100)
-- `lr`: Learning rate (default: 1e-3)
-- `probe_epochs`: Number of epochs for linear probe training (default: 50)
-- `probe_lr`: Learning rate for linear probe (default: 1e-3)
+```bash
+python main.py \
+    --model_type resnet \
+    --loss_type bcs \
+    --lmbd 10.0 \
+    --batch_size 256 \
+    --epochs 300
+```
 
-## Evaluation
+#### 3. Vision Transformer + VICReg Loss
 
-The model is evaluated using linear probing:
-1. The encoder is frozen after self-supervised training
-2. A linear classifier is trained on top of the frozen representations
-3. Performance is measured on a binary classification task (digit present/absent)
+```bash
+python main.py \
+    --model_type vit_s \
+    --patch_size 2 \
+    --loss_type vicreg \
+    --sim_loss_weight 25.0 \
+    --var_loss_weight 25.0 \
+    --cov_loss_weight 1.0 \
+    --batch_size 256 \
+    --epochs 300
+```
 
-## Key Differences from Video JEPA
+For ViT-Base, use `--model_type vit_b` instead of `vit_s`.
 
-1. **Input**: Individual images instead of video sequences
-2. **Temporal dimension**: Removed - no temporal modeling
-3. **Prediction task**: Simple reconstruction instead of future frame prediction
-4. **Evaluation**: Linear probing for classification instead of detection metrics
+## Results
 
-## Expected Results
+### Collapse Prevention via VICReg and SIGReg
 
-- The model should learn meaningful representations that enable good linear probe performance
-- VC loss should prevent representation collapse
-- Linear probe accuracy should improve with better learned representations
+### Using a Projector
 
-## Implementation Details
+### Using a Transformer
 
-### ImageOnlyDataset
-- Extracts individual frames from the Moving MNIST video dataset
-- Each frame becomes a separate training sample
-- Preserves digit location information for evaluation
-
-### ImageJEPA
-- Simplified JEPA architecture for image-only processing
-- Uses reconstruction as the prediction task
-- Applies VC loss to prevent representation collapse
-
-### LinearProbe
-- Frozen encoder with trainable linear classifier
-- Evaluates learned representations on digit classification
-- Uses binary classification (digit present/absent)
+## References
+- [JEPA Paper](https://openreview.net/pdf?id=BZ5a1r-kVsf)
+- [ResNet Architecture](https://arxiv.org/abs/1512.03385)
+- [Transformer Architecture](https://arxiv.org/abs/1706.03762)
+- [Vision Transformer Architecture](https://arxiv.org/abs/2010.11929)
+- [VICReg](https://arxiv.org/abs/2105.04906)
+- [LeJEPA](https://arxiv.org/abs/2511.08544)

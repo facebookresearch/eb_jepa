@@ -72,19 +72,8 @@ def run(
     )
 
     wandb.init(
-        project="jepa-unlabeled-video",  # Replace with your project name
-        config={  # Optional: store hyperparameters/config
-            "batch_size": batch_size,
-            "dobs": dobs,
-            "henc": henc,
-            "hpre": hpre,
-            "dstc": dstc,
-            "steps": steps,
-            "cov_coeff": cov_coeff,
-            "std_coeff": std_coeff,
-            "epochs": epochs,
-            "lr": lr,
-        },
+        project="jepa-unlabeled-video",
+        config={"batch_size": batch_size, "dobs": dobs, "henc": henc, "hpre": hpre, "dstc": dstc, "steps": steps, "cov_coeff": cov_coeff, "std_coeff": std_coeff, "epochs": epochs, "lr": lr}
     )
 
     for epoch in range(epochs):

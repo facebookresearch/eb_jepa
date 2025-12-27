@@ -83,11 +83,7 @@ class ResNet5(nn.Module):
     A lightweight ResNet with 5 layers (2 blocks)
     """
 
-<<<<<<< HEAD
     def __init__(self, in_d, h_d, out_d, s1=1, s2=1, s3=1, avg_pool=False):
-=======
-    def __init__(self, in_d, h_d, out_d, s1=1):
->>>>>>> main
         super().__init__()
         self.conv1 = nn.Conv2d(
             in_d, h_d, kernel_size=3, stride=1, padding=1, bias=False
