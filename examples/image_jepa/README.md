@@ -7,17 +7,16 @@ This example demonstrates how to train a Joint Embedding Predictive Architecture
 ## Features
 
 - **Image-only training**: Training from unlabeled image data
-- **Representation learning**: Learns meaningful representations through self-supervised learning, avoids collapse using Variance-Covariance or LeJEPA (SIGReg) Regularization.
-- **Linear probing evaluation**: Evaluates learned representations using a linear classifier
+- **Representation learning**: Learns meaningful representations through self-supervised learning, by learning to be invariant to image augmentations (crop, color augmentations, etc).
+- **Linear probing evaluation**: Evaluates learned representations using a linear classifier. This is evaluated online, during training on a validation set.
 
 
 ## Architecture
 
 The Image JEPA consists of:
-- **Encoder**: ResNet5 backbone that processes individual images
-- **Regularizer**: Variance-Covariance (VC) loss to prevent representation collapse
-- **Predictor**: Simple reconstruction task for individual images
-- **Linear Probe**: Frozen encoder + linear classifier for evaluation
+- **Encoder**: ResNet18/Transformer backbone that processes individual images
+- **Regularizer**: Variance-Covariance (VC) or LeJEPA loss to prevent representation collapse
+- **Projector**: Learned MLP Projector (loss is computed on the projected subspace)
 
 ## Usage
 
@@ -64,6 +63,19 @@ For ViT-Base, use `--model_type vit_b` instead of `vit_s`.
 
 ## Results
 
+### Comparison: LE-JEPA vs VICReg
+
+![Hyperparameter Sensitivity Comparison](assets/hyperparam_sensitivity_comparison.png)
+
+| Metric | LE-JEPA (SigReg) | VICReg |
+|--------|------------------|--------|
+| Best Accuracy | 90.67% | 90.95% |
+| Projector Benefit | +2.5% | Variable |
+| Stability | High | Lower (sensitive to hyperparams) |
+| Best Projector Dims | 2048×128 | 2048x2048 |
+
+**Conclusion:** Both methods achieve similar peak performance (~90%). LE-JEPA is more stable across hyperparameter choices, while VICReg can match performance but requires more careful tuning.
+
 Results on CIFAR-10 with ResNet-18 backbone, trained for 300 epochs.
 
 ### LE-JEPA (SigREG Loss) Best Configuration
@@ -78,8 +90,6 @@ Results on CIFAR-10 with ResNet-18 backbone, trained for 300 epochs.
 | proj_output_dim | 128 |
 
 ### Impact of Lambda (λ)
-
-![LE-JEPA Lambda Sensitivity](assets/lejepa_lambda_sensitivity.png)
 
 | λ | Best Acc |
 |---|----------|
@@ -114,18 +124,6 @@ Top 5 dimension combinations (with λ=10.0, batch_size=256):
 
 ---
 
-### Comparison: LE-JEPA vs VICReg
-
-![Hyperparameter Sensitivity Comparison](assets/hyperparam_sensitivity_comparison.png)
-
-| Metric | LE-JEPA (SigReg) | VICReg |
-|--------|------------------|--------|
-| Best Accuracy | 90.67% | 90.95% |
-| Projector Benefit | +2.5% | Variable |
-| Stability | High | Lower (sensitive to hyperparams) |
-| Best Projector Dims | 2048×128 | 2048x2048 |
-
-**Conclusion:** Both methods achieve similar peak performance (~90%). LE-JEPA is more stable across hyperparameter choices, while VICReg can match performance but requires more careful tuning.
 
 ## References
 - [JEPA Paper](https://openreview.net/pdf?id=BZ5a1r-kVsf)
