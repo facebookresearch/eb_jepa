@@ -293,7 +293,7 @@ def create_comparison_gif(
 
     # Save as GIF
     imageio.mimsave(save_path, frames, fps=fps, loop=0)
-    logging.info(f"Comparison GIF saved to {save_path}")
+    logging.info(f"   ✓ Saved comparison GIF: {os.path.basename(save_path)}")
 
     return frames
 

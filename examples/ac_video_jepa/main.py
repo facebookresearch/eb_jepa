@@ -49,7 +49,7 @@ def launch_plan_eval(
     plan_cfg=None,
 ):
     """Evaluate the planning capabilities of the trained JEPA model."""
-    logging.info(f"Evaluating at epoch {epoch} and iteration {global_step}")
+    logging.info(f"🎯 Planning eval | epoch={epoch} step={global_step}")
     jepa.eval()
     eval_folder = folder / "plan_eval" / f"step-{global_step}{suffix}"
     os.makedirs(eval_folder, exist_ok=True)
@@ -58,7 +58,6 @@ def launch_plan_eval(
         plan_cfg_file = eval_folder / "plan_config.yaml"
         with open(plan_cfg_file, "w") as f:
             yaml.dump(plan_cfg, f)
-        logging.info(f"Planning configuration saved to {plan_cfg_file}")
 
     eval_results = main_eval(
         plan_cfg=plan_cfg,
@@ -70,7 +69,7 @@ def launch_plan_eval(
         prober=prober,
     )
     logging.info(
-        f"Success rate: {eval_results['success_rate']:.2f}, Mean distance: {eval_results['mean_state_dist']:.4f}"
+        f"   ✓ success_rate={eval_results['success_rate']:.2f} | mean_dist={eval_results['mean_state_dist']:.4f}"
     )
     jepa.train()
 
@@ -91,7 +90,7 @@ def launch_unroll_eval(
 ):
     """Evaluate the unrolling (prediction) capabilities of the trained JEPA model."""
     jepa.eval()
-    logging.info(f"Evaluating unroll at epoch {epoch} and iteration {global_step}")
+    logging.info(f"📊 Unroll eval | epoch={epoch} step={global_step}")
     eval_folder = folder / "unroll_eval" / f"step-{global_step}{suffix}"
     os.makedirs(eval_folder, exist_ok=True)
     eval_results = main_unroll_eval(
@@ -104,7 +103,7 @@ def launch_unroll_eval(
     )
     steps = [0, 1, 2, 3]
     mean_values = " | ".join(
-        [f"{i}: {eval_results[f'val_rollout/mean_mse/{i}']:.2f}" for i in steps]
+        [f"t{i}={eval_results[f'val_rollout/mean_mse/{i}']:.2f}" for i in steps]
     )
     std_values = " | ".join(
         [f"{i}: {eval_results[f'val_rollout/std_mse/{i}']:.2f}" for i in steps]
@@ -195,7 +194,9 @@ def main(
     loader, val_loader, data_config = init_data(
         env_name=cfg.data.env_name, cfg_data=dict(cfg.data)
     )
-    logging.info(f"Loader: {len(loader)} batches, batch_size={data_config.batch_size}")
+    logging.info(
+        f"📦 Data: {len(loader)} batches × {data_config.batch_size} samples"
+    )
     # Set seed
     torch.manual_seed(cfg.meta.seed)
     np.random.seed(cfg.meta.seed)
@@ -244,10 +245,7 @@ def main(
     steps_per_epoch = data_config.size // data_config.batch_size
     total_steps = cfg.optim.epochs * steps_per_epoch
 
-    logging.info(f"cfg: {cfg}")
-    logging.info(
-        f"Initialized loader with {len(loader)} samples, batch size {data_config.batch_size}"
-    )
+    logging.info(f"⚙️  Config: {cfg}")
 
     if cfg.logging.get("log_wandb"):
         project_name = "eb-jepa-ac" if not quick_debug else "eb-jepa-ac-debug"
@@ -272,9 +270,7 @@ def main(
 
         if cfg.logging.get("wandb_sweep") and cfg.logging.get("wandb_sweep_id"):
             wandb_config["tags"].append(f"sweep_{cfg.logging.wandb_sweep_id}")
-            logging.info(
-                f"Registering run with wandb sweep {cfg.logging.wandb_sweep_id}"
-            )
+            logging.info(f"W&B sweep: {cfg.logging.wandb_sweep_id}")
 
             # Check for existing run to resume
             if os.path.exists(wandb_run_id_file):
@@ -288,30 +284,26 @@ def main(
                 os.environ["WANDB_RUN_ID"] = wandb_run_id
                 os.environ["WANDB_RESUME"] = "allow"
                 wandb.init(**wandb_config)
-                logging.info(
-                    f"Resuming Wandb run {wandb_run_id} in sweep {cfg.logging.wandb_sweep_id}"
-                )
+                logging.info(f"Resuming W&B run {wandb_run_id} (sweep)")
             else:
                 # First run: set WANDB_SWEEP_ID to associate with sweep
                 os.environ["WANDB_SWEEP_ID"] = cfg.logging.wandb_sweep_id
                 wandb.init(**wandb_config)
                 with open(wandb_run_id_file, "w") as f:
                     f.write(wandb.run.id)
-                logging.info(
-                    f"Created new Wandb run {wandb.run.id} in sweep {cfg.logging.wandb_sweep_id}"
-                )
+                logging.info(f"Created W&B run {wandb.run.id} (sweep)")
         else:
             if os.path.exists(wandb_run_id_file):
                 with open(wandb_run_id_file, "r") as f:
                     wandb_run_id = f.read().strip()
                 wandb_config.update({"id": wandb_run_id, "resume": "allow"})
                 wandb.init(**wandb_config)
-                logging.info(f"Resuming Wandb run {wandb_run_id}")
+                logging.info(f"Resuming W&B run {wandb_run_id}")
             else:
                 wandb.init(**wandb_config)
                 with open(wandb_run_id_file, "w") as f:
                     f.write(wandb.run.id)
-                logging.info(f"Created new Wandb run {wandb.run.id}")
+                logging.info(f"Created W&B run {wandb.run.id}")
 
     # -- MODEL
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -348,7 +340,7 @@ def main(
         )
     else:
         projector = None
-    logging.info("Encoder output shape: " + str(test_output.shape))
+    logging.info(f"🧠 Encoder output: {tuple(test_output.shape)}")
     idm = InverseDynamicsModel(
         state_dim=h
         * w
@@ -374,8 +366,9 @@ def main(
 
     encoder_params = sum(p.numel() for p in encoder.parameters())
     predictor_params = sum(p.numel() for p in predictor.parameters())
-    logging.info(f"Encoder parameters: {encoder_params:,}")
-    logging.info(f"Predictor parameters: {predictor_params:,}")
+    logging.info(
+        f"🔢 Parameters: encoder={encoder_params:,} | predictor={predictor_params:,}"
+    )
 
     # -- PROBER
     xy_head = MLPXYHead(
@@ -438,13 +431,7 @@ def main(
                     probe_scheduler.load_state_dict(
                         checkpoint["probe_scheduler_state_dict"]
                     )
-                if "optimizer_state_dict" in checkpoint:
-                    logging.info(
-                        "Found old optimizer state dict format - skipping optimizer loading"
-                    )
-                logging.info(
-                    f"Loaded model from {checkpoint_path} at epoch {start_epoch}"
-                )
+                logging.info(f"📂 Loaded checkpoint: epoch={start_epoch}")
             else:
                 logging.warning(f"Checkpoint not found at {checkpoint_path}")
                 start_epoch = 1
@@ -456,7 +443,7 @@ def main(
             start_epoch -= 1
     # Compile
     if torch.cuda.is_available() and cfg.model.compile:
-        logging.info("Compiling models with torch.compile...")
+        logging.info("⚡ Compiling model with torch.compile")
         jepa = torch.compile(jepa)
 
     # -- TRAINING LOOP
@@ -580,8 +567,10 @@ def main(
                         )
                     for loss_name, loss_value in regldict.items():
                         log_data[f"train/regl/{loss_name}"] = loss_value
-                    log_message = f"Epoch: {epoch} | Step: {idx} | GlobStep: {global_step} | Loss: {total_loss.item():.3f} | RegLoss: {regl.item():.3f} | PredLoss: {pl.item():.6f} | ProbLoss: {xy_loss.item():.3f}"
-                    logging.info(log_message)
+                    logging.info(
+                        f"[E{epoch:03d}|S{global_step:05d}] loss={total_loss.item():.3f} "
+                        f"reg={regl.item():.3f} pred={pl.item():.4f} probe={xy_loss.item():.3f}"
+                    )
 
                     if cfg.logging.get("log_wandb"):
                         wandb.log(log_data, step=global_step)
@@ -673,7 +662,7 @@ def main(
 
                 save_checkpoint()
     else:
-        logging.info("Plan evaluation mode: skip train loop.")
+        logging.info("🎯 Plan evaluation mode (skipping training)")
         global_step = start_epoch * len(loader)
         launch_plan_eval(
             jepa,
