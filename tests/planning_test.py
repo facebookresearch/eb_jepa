@@ -4,7 +4,6 @@ from unittest.mock import Mock, patch
 
 import gymnasium as gym
 import numpy as np
-import pytest
 import torch
 
 from eb_jepa.planning import (
@@ -247,7 +246,6 @@ def test_main_eval(mock_gc_agent):
     mock_gc_agent.return_value = mock_agent_instance
 
     # Create plan config
-    from omegaconf import OmegaConf
 
     plan_cfg = {
         "planner": {

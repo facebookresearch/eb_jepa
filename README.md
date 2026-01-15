@@ -35,14 +35,6 @@ uv sync
 
 This will create a virtual environment within the project folder at `.venv/`. To activate this environment, run `source .venv/bin/activate`.
 
-### Conda alternative
-
-```bash
-conda create -n eb_jepa python=3.12 -c conda-forge -y
-conda activate eb_jepa
-uv pip install -e ".[dev]"
-```
-
 Alternatively, if you don't want to run activate everytime, you can just prepend `uv run` before your python scripts:
 
 ```bash
