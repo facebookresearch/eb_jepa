@@ -8,12 +8,12 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 import yaml
 from omegaconf import OmegaConf
 from torch.amp import GradScaler, autocast
 from torch.optim import AdamW
 
-import wandb
 from eb_jepa.architectures import (
     ImpalaEncoder,
     InverseDynamicsModel,
@@ -194,9 +194,7 @@ def main(
     loader, val_loader, data_config = init_data(
         env_name=cfg.data.env_name, cfg_data=dict(cfg.data)
     )
-    logging.info(
-        f"📦 Data: {len(loader)} batches × {data_config.batch_size} samples"
-    )
+    logging.info(f"📦 Data: {len(loader)} batches × {data_config.batch_size} samples")
     # Set seed
     torch.manual_seed(cfg.meta.seed)
     np.random.seed(cfg.meta.seed)
@@ -384,7 +382,8 @@ def main(
     jepa_optimizer, jepa_scheduler = None, None
     if train_jepa:
         jepa_optimizer = AdamW(
-            jepa.parameters(), lr=cfg.optim.lr,
+            jepa.parameters(),
+            lr=cfg.optim.lr,
             weight_decay=cfg.optim.get("weight_decay", 1e-6),
         )
         jepa_scheduler = CosineWithWarmup(jepa_optimizer, total_steps, warmup_ratio=0.1)
@@ -392,7 +391,9 @@ def main(
     probe_optimizer, probe_scheduler = None, None
     if train_probe:
         probe_optimizer = AdamW(xy_head.parameters(), lr=1e-3, weight_decay=1e-5)
-        probe_scheduler = CosineWithWarmup(probe_optimizer, total_steps, warmup_ratio=0.1)
+        probe_scheduler = CosineWithWarmup(
+            probe_optimizer, total_steps, warmup_ratio=0.1
+        )
 
     # -- LOAD CKPT
     start_epoch = 1

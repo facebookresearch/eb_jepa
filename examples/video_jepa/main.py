@@ -2,11 +2,11 @@ import fire
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import wandb
 from eb_jepa.architectures import (
     DetHead,
     Projector,
@@ -73,7 +73,18 @@ def run(
 
     wandb.init(
         project="jepa-unlabeled-video",
-        config={"batch_size": batch_size, "dobs": dobs, "henc": henc, "hpre": hpre, "dstc": dstc, "steps": steps, "cov_coeff": cov_coeff, "std_coeff": std_coeff, "epochs": epochs, "lr": lr}
+        config={
+            "batch_size": batch_size,
+            "dobs": dobs,
+            "henc": henc,
+            "hpre": hpre,
+            "dstc": dstc,
+            "steps": steps,
+            "cov_coeff": cov_coeff,
+            "std_coeff": std_coeff,
+            "epochs": epochs,
+            "lr": lr,
+        },
     )
 
     for epoch in range(epochs):

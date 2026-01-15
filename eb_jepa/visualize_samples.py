@@ -228,5 +228,3 @@ def save_gif_HWC(frames_list, save_path, fps=10):
 
     # Save as GIF
     imageio.mimsave(save_path, images, fps=fps, loop=0)
-
-

@@ -570,50 +570,60 @@ class ContrastiveLoss(nn.Module):
 
 class VICRegLoss(nn.Module):
     """VICReg loss module.
-    
+
     Args:
         sim_loss_weight: Weight for similarity (invariance) loss
         var_loss_weight: Weight for variance loss
         cov_loss_weight: Weight for covariance loss
     """
-    
+
     def __init__(self, var_loss_weight=1.0, cov_loss_weight=1.0):
         super().__init__()
         self.var_loss_weight = var_loss_weight
         self.cov_loss_weight = cov_loss_weight
-    
+
     def forward(self, z1, z2):
         """Compute VICReg loss.
-        
+
         Args:
             z1: First projection tensor (batch_size, features)
             z2: Second projection tensor (batch_size, features)
-            
+
         Returns:
             tuple: (total_loss, sim_loss, var_loss, cov_loss)
         """
         batch_size = z1.size(0)
-        
+
         # Invariance loss (similarity)
         sim_loss = F.mse_loss(z1, z2)
-        
+
         # Variance loss
         z1_std = torch.sqrt(z1.var(dim=0) + 1e-4)
         z2_std = torch.sqrt(z2.var(dim=0) + 1e-4)
         var_loss = torch.mean(F.relu(1 - z1_std)) + torch.mean(F.relu(1 - z2_std))
-        
+
         # Covariance loss
         z1_centered = z1 - z1.mean(dim=0)
         z2_centered = z2 - z2.mean(dim=0)
         z1_cov = torch.mm(z1_centered.T, z1_centered) / (batch_size - 1)
         z2_cov = torch.mm(z2_centered.T, z2_centered) / (batch_size - 1)
-        
-        cov_loss = (z1_cov.pow(2).sum() - z1_cov.diagonal().pow(2).sum()) / (z1_cov.size(0)**2 - z1_cov.size(0)) + \
-                   (z2_cov.pow(2).sum() - z2_cov.diagonal().pow(2).sum()) / (z2_cov.size(0)**2 - z2_cov.size(0))
-        
-        total_loss = sim_loss + self.var_loss_weight * var_loss + self.cov_loss_weight * cov_loss
-        
-        return {"loss": total_loss, "invariance_loss": sim_loss, "var_loss": var_loss, "cov_loss": cov_loss}
+
+        cov_loss = (z1_cov.pow(2).sum() - z1_cov.diagonal().pow(2).sum()) / (
+            z1_cov.size(0) ** 2 - z1_cov.size(0)
+        ) + (z2_cov.pow(2).sum() - z2_cov.diagonal().pow(2).sum()) / (
+            z2_cov.size(0) ** 2 - z2_cov.size(0)
+        )
+
+        total_loss = (
+            sim_loss + self.var_loss_weight * var_loss + self.cov_loss_weight * cov_loss
+        )
+
+        return {
+            "loss": total_loss,
+            "invariance_loss": sim_loss,
+            "var_loss": var_loss,
+            "cov_loss": cov_loss,
+        }
 
 
 ######################################################
@@ -623,6 +633,7 @@ class VICRegLoss(nn.Module):
 def all_reduce(x, op):
     """All-reduce operation for distributed training."""
     import torch.distributed as dist
+
     if dist.is_available() and dist.is_initialized():
         op = dist.ReduceOp.__dict__[op]
         dist.all_reduce(x, op=op)
@@ -649,7 +660,7 @@ def epps_pulley(x, t_min=-3, t_max=3, n_points=10):
 
 class BCS(nn.Module):
     """BCS (Batched Characteristic Slicing) loss for LE-JEPA."""
-    
+
     def __init__(self, num_slices=256, lmbd=10.0):
         super().__init__()
         self.num_slices = num_slices
@@ -672,4 +683,3 @@ class BCS(nn.Module):
         invariance_loss = F.mse_loss(z1, z2).mean()
         total_loss = invariance_loss + self.lmbd * bcs
         return {"loss": total_loss, "bcs_loss": bcs, "invariance_loss": invariance_loss}
-
