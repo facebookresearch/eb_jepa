@@ -1,39 +1,22 @@
-######################################################
-# Loss functions to prevent JEPAs from collapsing
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-################################################################
-# Utilities
 
-
-# simple square loss
 def sq_loss(x, y, reduction="mean"):
+    """Simple square loss (MSE)."""
     return nn.functional.mse_loss(x, y, reduction=reduction)
 
 
-######################################################
-# prediction loss functions
-
-
-# compute square loss between two sequences
-# represented as BFTHW tensors.
-# a shift is necessary for the predictor cost to
-# make sure the architecture is strictly causal.
 def square_cost_seq(state, predi):
+    """Square loss between two [B, C, T, H, W] sequences."""
     return sq_loss(state, predi)
 
 
-# square loss between BFTHW sequences.
-# This is used primarily for the prediction loss module.
 class SquareLossSeq(nn.Module):
+    """Square loss over a sequence [B, C, T, H, W] (feature dim at dim 1)."""
+
     def __init__(self, proj=None):
-        """
-        Square cost over a sequence represented
-        as BFTHW. Assumes the T dimension is at dim 2
-        """
         super().__init__()
         self.proj = nn.Identity() if proj is None else proj
 
@@ -43,137 +26,31 @@ class SquareLossSeq(nn.Module):
         return square_cost_seq(state, predi)
 
 
-######################################################
-# Variance-Covariance loss on a batch of samples
-
-
-# VC cost function
-# input x is a 2D tensor Samples*Features (i.e. (B*T*H*W)*F )
-# this computes two terms:
-# 1. the absolute deviation of the mean of all the
-# variables from zero.
-# 2. the absolute deviation of the covariance matrix
-# of x from the identity matrix.
-#
-# mcoeff is a scalar coefficient that attracts the means
-# of the variables to zero.
-# ccoeff is a Features*Features square matrix of
-# coefficients for each term in the covariance matrix.
-# c is the constant to which the variances (diagonal terms) are pinned.
-def off_diagonal(x):
-    n, m = x.shape
-    assert n == m
-    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
-
-
-def vc_cost_orig(x, std_coeff, cov_coeff):
-    """
-    x: (B*T*H*W, F')
-    """
-    x = x - x.mean(dim=0)
-    std_x = torch.sqrt(x.var(dim=0) + 0.0001)  # (F',)
-    std_loss = torch.mean(F.relu(1 - std_x))
-    cov_x = (x.T @ x) / (x.shape[0] - 1)  # (F', F')
-    cov_loss = off_diagonal(cov_x).pow_(2).sum().div(x.shape[-1] ** 2 - x.shape[-1])
-    loss = std_coeff * std_loss + cov_coeff * cov_loss
-    loss_dict = {
-        "std_loss": std_loss.item(),
-        "cov_loss": cov_loss.item(),
-    }
-    total_unweighted_loss = std_loss + cov_loss
-    return loss, total_unweighted_loss, loss_dict
-
-
-# Class for VC loss.
-# attracts the means of the variables to zero
-# and the covariance matrix towards the identity.
 class VCLoss(nn.Module):
+    """Variance-Covariance loss attracting means to zero and covariance to identity."""
+
     def __init__(self, std_coeff, cov_coeff, proj=None):
-        """
-        Variance-Covariance loss class
-        makes the means of the variables zero, and
-        makes the covariance matrix as close to identity as possible
-        """
         super().__init__()
         self.std_coeff = std_coeff
         self.cov_coeff = cov_coeff
         self.proj = nn.Identity() if proj is None else proj
+        self.std_loss_fn = HingeStdLoss(std_margin=1.0)
+        self.cov_loss_fn = CovarianceLoss()
 
     def forward(self, x, actions=None):
-        # turn input into a samples*features 2D tensor.
-        # assumes feature dimension is dimension 1 (e.g. BFTHW)
-        # bs, f, t, h, w = x.shape
-        # fx = self.proj(x.permute(0, 2, 1, 3, 4).reshape(-1, f * h * w))
-        x = x.transpose(0, 1).flatten(1).transpose(0, 1)  # (B*T*H*W, F)
-        fx = self.proj(x)  # (B*T*H*W, F')
-        return vc_cost_orig(fx, std_coeff=self.std_coeff, cov_coeff=self.cov_coeff)
+        x = x.transpose(0, 1).flatten(1).transpose(0, 1)  # [B*T*H*W, C]
+        fx = self.proj(x)  # [B*T*H*W, C']
 
+        std_loss = self.std_loss_fn(fx)
+        cov_loss = self.cov_loss_fn(fx)
 
-######################################################
-# Contrastive loss on a batch of samples
-
-
-def contrastive_cost(
-    x, temperature=0.1, negative_weight=1.0, subset_size=None, num_subsets=1
-):
-    """
-    Contrastive loss function with efficient subset sampling
-    input x is a BFTHW array
-
-    This implements a contrastive objective that:
-    1. Normalizes features to unit vectors
-    2. Computes pairwise cosine similarities on random subsets
-    3. Encourages samples to be diverse (pushes similar samples apart)
-    4. Uses subset sampling for computational efficiency
-
-    Args:
-        x: Input tensor of shape (B, F, T, H, W)
-        temperature: Temperature scaling parameter for similarities
-        negative_weight: Weight for negative pairs (diversity encouragement)
-        subset_size: Size of random subsets to sample (None means use all samples)
-        num_subsets: Number of random subsets to sample and average over
-    """
-    # put feature dimension first
-    # turns x from BFTHW to FBTHW format
-    x = x.transpose(0, 1)
-    # flatten to samples*features 2D tensor
-    flattened_state = x.flatten(1).transpose(0, 1)  # (B*T*H*W, F)
-
-    num_samples = flattened_state.size(0)
-
-    if subset_size is None or subset_size >= num_samples:
-        # Use all samples if subset_size is not specified or too large
-        subset_size = num_samples
-        num_subsets = 1
-
-    total_loss = 0.0
-
-    for _ in range(num_subsets):
-        # Randomly sample subset_size samples
-        indices = torch.randperm(num_samples, device=x.device)[:subset_size]
-        subset_samples = flattened_state[indices]
-
-        # Normalize features to unit vectors
-        x_norm = F.normalize(subset_samples, p=2, dim=1)
-
-        # Compute pairwise cosine similarities
-        similarities = torch.mm(x_norm, x_norm.t()) / temperature
-
-        # Create mask to exclude diagonal (self-similarities)
-        mask = torch.eye(subset_size, device=x.device).bool()
-
-        # Extract off-diagonal similarities (treating all as negative pairs for diversity)
-        off_diagonal_sims = similarities.masked_select(~mask)
-
-        # Contrastive loss: encourage diversity by penalizing high similarities
-        # Using logsumexp for numerical stability
-        diversity_loss = torch.logsumexp(off_diagonal_sims, dim=0)
-        total_loss += diversity_loss
-
-    # Average over subsets
-    total_loss = total_loss / num_subsets
-
-    return negative_weight * total_loss
+        loss = self.std_coeff * std_loss + self.cov_coeff * cov_loss
+        total_unweighted_loss = std_loss + cov_loss
+        loss_dict = {
+            "std_loss": std_loss.item(),
+            "cov_loss": cov_loss.item(),
+        }
+        return loss, total_unweighted_loss, loss_dict
 
 
 class HingeStdLoss(torch.nn.Module):
@@ -194,7 +71,7 @@ class HingeStdLoss(torch.nn.Module):
     def forward(self, x: torch.Tensor):
         """
         Args:
-            x: Tensor[N, D] where N is number of samples, D is feature dimension
+            x: [N, D] where N is number of samples, D is feature dimension
         Returns:
             std_loss: Scalar tensor with the hinge loss on standard deviations
         """
@@ -205,32 +82,31 @@ class HingeStdLoss(torch.nn.Module):
 
 
 class CovarianceLoss(torch.nn.Module):
-    def __init__(self, adjust_conv: bool = True):
+    def __init__(self):
         """
         Penalizes off-diagonal elements of the covariance matrix to encourage
         feature decorrelation.
-        Args:
-            adjust_conv (bool, default=True):
-                If True, normalizes by (D - 1) where D is feature dimensionality.
+
+        Normalizes by D * (D - 1) where D is feature dimensionality.
         """
         super().__init__()
-        self.adjust_conv = adjust_conv
+
+    def off_diagonal(self, x):
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
     def forward(self, x: torch.Tensor):
         """
         Args:
-            x: Tensor[N, D] where N is number of samples, D is feature dimension
+            x: [N, D] where N is number of samples, D is feature dimension
         """
         batch_size = x.shape[0]
         num_features = x.shape[-1]
         x = x - x.mean(dim=0, keepdim=True)
         cov = (x.T @ x) / (batch_size - 1)  # [D, D]
         # Calculate off-diagonal loss
-        diag_elements = torch.diag(cov).pow(2).sum()
-        cov_loss = (cov.pow(2).sum() - diag_elements) / num_features
-
-        if self.adjust_conv:
-            cov_loss = cov_loss / (num_features - 1)
+        cov_loss = self.off_diagonal(cov).pow(2).mean()
 
         return cov_loss
 
@@ -247,7 +123,7 @@ class TemporalSimilarityLoss(torch.nn.Module):
     def forward(self, x: torch.Tensor):
         """
         Args:
-            x: Tensor[T, N, D] where T is time steps, N is batch size, D is feature dimension
+            x: [T, N, D] where T is time steps, N is batch size, D is feature dimension
         """
         if x.shape[0] <= 1:
             return torch.tensor(0.0, device=x.device)
@@ -268,8 +144,8 @@ class InverseDynamicsLoss(torch.nn.Module):
     def forward(self, x: torch.Tensor, actions: torch.Tensor):
         """
         Args:
-            x: Tensor[T, B, D] - States across time steps
-            actions: Tensor[B, A, T] - Ground truth actions between consecutive states
+            x: [T, B, D] - States across time steps
+            actions: [B, A, T] - Ground truth actions between consecutive states
         """
         if x.shape[0] <= 1 or actions is None:
             return torch.tensor(0.0, device=x.device)
@@ -300,7 +176,6 @@ class VC_IDM_Sim_Regularizer(torch.nn.Module):
         idm_coeff: float = 0.0,
         idm: nn.Module = None,
         std_margin: float = 1,
-        adjust_conv: bool = True,
         first_t_only: bool = True,
         projector: nn.Module = None,
         spatial_as_samples: bool = False,
@@ -323,7 +198,6 @@ class VC_IDM_Sim_Regularizer(torch.nn.Module):
             idm_coeff (float): Weight for inverse dynamics loss
             idm (nn.Module): Inverse dynamics model
             std_margin (float): Minimum desired std per feature
-            adjust_conv (bool): Normalize covariance loss by (D-1)
             first_t_only (bool): Use only first time slice for std/cov loss
             projector (nn.Module): Optional projection layer
             spatial_as_samples (bool): Treat spatial locations as samples
@@ -344,32 +218,29 @@ class VC_IDM_Sim_Regularizer(torch.nn.Module):
 
         # Initialize individual loss components
         self.std_loss_fn = HingeStdLoss(std_margin=std_margin)
-        self.cov_loss_fn = CovarianceLoss(adjust_conv=adjust_conv)
+        self.cov_loss_fn = CovarianceLoss()
         self.sim_loss_fn = TemporalSimilarityLoss()
         self.idm_loss_fn = InverseDynamicsLoss(idm) if idm is not None else None
 
     def forward(self, x, actions=None):
         """
-        x (Tensor[B, C, T, H, W]):
-            Input activations.  Internally reshaped to either
-            (1, B, D) when `first_t_only=True` or ((T·B), D) otherwise,
-            with D = C·H·W.
-        first_t_only (bool, default=True):
-            If True, only uses the first time‑slice for both std and cov loss;
-            if False, flattens all time‑slices into the batch dimension.
+        Args:
+            x: [B, C, T, H, W] - Input activations. Internally reshaped to either
+                [1, B, D] when first_t_only=True or [T*B, D] otherwise, with D=C*H*W.
+            actions: [B, A, T] - Optional actions for IDM loss
         """
         b, c, t, h, w = x.shape
 
         # divergent gradient paths for x_unprojected and x_projected
-        x_unprojected = x.permute(2, 0, 1, 3, 4).reshape(t, b, -1)  # [t, b, c*h*w]
+        x_unprojected = x.permute(2, 0, 1, 3, 4).reshape(t, b, -1)  # [T, B, C*H*W]
 
-        x_flat = x.permute(0, 2, 3, 4, 1).reshape(-1, c)  # [b*t*h*w, c]
-        x_proj = self.projector(x_flat)  # [b*t*h*w, c_out]
+        x_flat = x.permute(0, 2, 3, 4, 1).reshape(-1, c)  # [B*T*H*W, C]
+        x_proj = self.projector(x_flat)  # [B*T*H*W, C_out]
         c_out = x_proj.shape[-1]
-        x_projected = x_proj.view(b, t, h, w, c_out)  # [b, t, h, w, c_out]
+        x_projected = x_proj.view(b, t, h, w, c_out)  # [B, T, H, W, C_out]
         x_projected_reshaped = x_projected.permute(2, 0, 1, 3, 4).reshape(
             t, b, -1
-        )  # [t, b, c_out*h*w]
+        )  # [T, B, C_out*H*W]
 
         # SIM_T LOSS
         if self.sim_t_after_proj:
@@ -388,29 +259,29 @@ class VC_IDM_Sim_Regularizer(torch.nn.Module):
         # STD and COV LOSS
         if self.spatial_as_samples:
             if self.first_t_only:
-                # Use only first time: [b*h*w, c_out]
+                # Use only first time: [B*H*W, C_out]
                 x_for_vc = x_projected[:, 0].reshape(b * h * w, c_out)
                 assert x_for_vc.shape == (b * h * w, c_out)
             else:
-                # Use all times: [b*t*h*w, c_out]
+                # Use all times: [B*T*H*W, C_out]
                 x_for_vc = x_projected.reshape(-1, c_out)
                 assert x_for_vc.shape == (b * t * h * w, c_out)
         else:
             x_for_vc = x_projected.permute(0, 1, 4, 2, 3).reshape(
                 b, t, -1
-            )  # [b, t, c_out*h*w]
+            )  # [B, T, C_out*H*W]
             if self.first_t_only:
-                # Use only first time: [b, c_out*h*w]
+                # Use only first time: [B, C_out*H*W]
                 x_for_vc = x_for_vc[:, 0]
                 assert x_for_vc.shape == (b, c_out * h * w)
             else:
-                # Use all times: [b*t, c_out*h*w]
+                # Use all times: [B*T, C_out*H*W]
                 x_for_vc = x_for_vc.reshape(-1, x_for_vc.size(-1))
                 assert x_for_vc.shape == (b * t, c_out * h * w)
-        # [b*t, c_out*h*w] if first_t_only=False and spatial_as_samples=False
-        # or [b, c_out*h*w] if first_t_only=True and spatial_as_samples=False
-        # or [b*h*w, c_out] if first_t_only=True spatial_as_samples=True
-        # or [b*t*h*w, c_out] if first_t_only=False spatial_as_samples=True
+        # [B*T, C_out*H*W] if first_t_only=False and spatial_as_samples=False
+        # or [B, C_out*H*W] if first_t_only=True and spatial_as_samples=False
+        # or [B*H*W, C_out] if first_t_only=True spatial_as_samples=True
+        # or [B*T*H*W, C_out] if first_t_only=False spatial_as_samples=True
         std_loss = self.std_loss_fn(x_for_vc)
         cov_loss = self.cov_loss_fn(x_for_vc)
 
@@ -432,118 +303,53 @@ class VC_IDM_Sim_Regularizer(torch.nn.Module):
         return total_weighted_loss, total_unweighted_loss, loss_dict
 
 
-class ContrastiveLoss(nn.Module):
-    def __init__(
-        self,
-        temperature=0.1,
-        negative_weight=1.0,
-        proj=None,
-        subset_size=None,
-        num_subsets=1,
-    ):
-        """
-        Contrastive loss class with efficient subset sampling
-        Encourages diversity among samples by penalizing high similarities
-
-        Args:
-            temperature: Temperature scaling parameter for similarities
-            negative_weight: Weight for the contrastive term
-            proj: Optional projection layer applied before computing loss
-            subset_size: Size of random subsets to sample (None means use all samples)
-            num_subsets: Number of random subsets to sample and average over
-        """
-        super().__init__()
-        self.temperature = temperature
-        self.negative_weight = negative_weight
-        self.subset_size = subset_size
-        self.num_subsets = num_subsets
-        self.proj = nn.Identity() if proj is None else proj
-
-    def forward(self, x):
-        # apply optional projection before computing contrastive cost
-        if self.proj is not None and not isinstance(self.proj, nn.Identity):
-            # apply projection to features: assumes feature dimension is dimension 1 (BFTHW)
-            fx = self.proj(x.transpose(0, 1).flatten(1).transpose(0, 1))
-            # reshape back to BFTHW format
-            b, f, t, h, w = x.shape
-            projected_f = fx.size(1)  # new feature dimension after projection
-            fx = fx.transpose(0, 1).view(projected_f, b, t, h, w).transpose(0, 1)
-            return contrastive_cost(
-                fx,
-                self.temperature,
-                self.negative_weight,
-                self.subset_size,
-                self.num_subsets,
-            )
-        else:
-            return contrastive_cost(
-                x,
-                self.temperature,
-                self.negative_weight,
-                self.subset_size,
-                self.num_subsets,
-            )
-
-
-######################################################
-# VICReg loss function
-
-
 class VICRegLoss(nn.Module):
-    """VICReg loss module.
-    
-    Args:
-        sim_loss_weight: Weight for similarity (invariance) loss
-        var_loss_weight: Weight for variance loss
-        cov_loss_weight: Weight for covariance loss
-    """
-    
-    def __init__(self, var_loss_weight=1.0, cov_loss_weight=1.0):
+    """VICReg loss combining invariance, variance (std), and covariance terms."""
+
+    def __init__(self, std_coeff=1.0, cov_coeff=1.0):
         super().__init__()
-        self.var_loss_weight = var_loss_weight
-        self.cov_loss_weight = cov_loss_weight
-    
+        self.std_coeff = std_coeff
+        self.cov_coeff = cov_coeff
+        self.std_loss_fn = HingeStdLoss(std_margin=1.0)
+        self.cov_loss_fn = CovarianceLoss()
+
     def forward(self, z1, z2):
         """Compute VICReg loss.
-        
+
         Args:
-            z1: First projection tensor (batch_size, features)
-            z2: Second projection tensor (batch_size, features)
-            
+            z1: [B, D] - First projection tensor
+            z2: [B, D] - Second projection tensor
+
         Returns:
-            tuple: (total_loss, sim_loss, var_loss, cov_loss)
+            dict with keys: loss, invariance_loss, var_loss, cov_loss
         """
-        batch_size = z1.size(0)
-        
         # Invariance loss (similarity)
         sim_loss = F.mse_loss(z1, z2)
-        
-        # Variance loss
-        z1_std = torch.sqrt(z1.var(dim=0) + 1e-4)
-        z2_std = torch.sqrt(z2.var(dim=0) + 1e-4)
-        var_loss = torch.mean(F.relu(1 - z1_std)) + torch.mean(F.relu(1 - z2_std))
-        
-        # Covariance loss
-        z1_centered = z1 - z1.mean(dim=0)
-        z2_centered = z2 - z2.mean(dim=0)
-        z1_cov = torch.mm(z1_centered.T, z1_centered) / (batch_size - 1)
-        z2_cov = torch.mm(z2_centered.T, z2_centered) / (batch_size - 1)
-        
-        cov_loss = (z1_cov.pow(2).sum() - z1_cov.diagonal().pow(2).sum()) / (z1_cov.size(0)**2 - z1_cov.size(0)) + \
-                   (z2_cov.pow(2).sum() - z2_cov.diagonal().pow(2).sum()) / (z2_cov.size(0)**2 - z2_cov.size(0))
-        
-        total_loss = sim_loss + self.var_loss_weight * var_loss + self.cov_loss_weight * cov_loss
-        
-        return {"loss": total_loss, "invariance_loss": sim_loss, "var_loss": var_loss, "cov_loss": cov_loss}
+
+        # Variance loss (applied to both views and summed)
+        var_loss = self.std_loss_fn(z1) + self.std_loss_fn(z2)
+
+        # Covariance loss (applied to both views and summed)
+        cov_loss = self.cov_loss_fn(z1) + self.cov_loss_fn(z2)
+
+        total_loss = sim_loss + self.std_coeff * var_loss + self.cov_coeff * cov_loss
+
+        return {
+            "loss": total_loss,
+            "invariance_loss": sim_loss,
+            "var_loss": var_loss,
+            "cov_loss": cov_loss,
+        }
 
 
 ######################################################
-# BCS (Batched Characteristic Slicing) loss for LE-JEPA
+# BCS (Batched Characteristic Slicing) loss for SIGReg
 
 
 def all_reduce(x, op):
     """All-reduce operation for distributed training."""
     import torch.distributed as dist
+
     if dist.is_available() and dist.is_initialized():
         op = dist.ReduceOp.__dict__[op]
         dist.all_reduce(x, op=op)
@@ -569,8 +375,8 @@ def epps_pulley(x, t_min=-3, t_max=3, n_points=10):
 
 
 class BCS(nn.Module):
-    """BCS (Batched Characteristic Slicing) loss for LE-JEPA."""
-    
+    """BCS (Batched Characteristic Slicing) loss for SIGReg."""
+
     def __init__(self, num_slices=256, lmbd=10.0):
         super().__init__()
         self.num_slices = num_slices
@@ -593,4 +399,3 @@ class BCS(nn.Module):
         invariance_loss = F.mse_loss(z1, z2).mean()
         total_loss = invariance_loss + self.lmbd * bcs
         return {"loss": total_loss, "bcs_loss": bcs, "invariance_loss": invariance_loss}
-

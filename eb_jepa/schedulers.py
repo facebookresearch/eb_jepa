@@ -1,8 +1,7 @@
-import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 
-class CosineWithWarmup(torch.optim.lr_scheduler._LRScheduler):
+class CosineWithWarmup:
     """
     A learning rate scheduler that combines linear warmup followed by cosine annealing.
 
@@ -37,10 +36,15 @@ class CosineWithWarmup(torch.optim.lr_scheduler._LRScheduler):
         self.scheduler = SequentialLR(
             optimizer, schedulers=[warmup, cosine], milestones=[self.warmup_steps]
         )
-        super().__init__(optimizer, last_epoch)
 
     def step(self):
         self.scheduler.step()
 
     def get_last_lr(self):
         return self.scheduler.get_last_lr()
+
+    def state_dict(self):
+        return self.scheduler.state_dict()
+
+    def load_state_dict(self, state_dict):
+        self.scheduler.load_state_dict(state_dict)

@@ -1,27 +1,27 @@
 import os
 import time
 from abc import ABC, abstractmethod
-from io import BytesIO
 from typing import Callable, List, NamedTuple, Optional
 
-import cv2
-import imageio
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import torch
 from einops import rearrange
 from omegaconf import OmegaConf
-from PIL import Image
 from tqdm import tqdm
 
 from eb_jepa.logging import get_logger
-from eb_jepa.visualize_samples import save_gif, save_gif_HWC, show_images, to3channels
+from eb_jepa.vis_utils import (
+    analyze_distances,
+    create_comparison_gif,
+    plot_losses,
+    save_decoded_frames,
+    save_gif,
+    show_images,
+)
 
 logger = get_logger(__name__)
 
-FIGSIZE_BASE = (4.0, 3.0)
 planner_name_map = {
     "cem": "CEMPlanner",
     "mppi": "MPPIPlanner",
@@ -163,140 +163,6 @@ def main_unroll_eval(
     return results
 
 
-def create_comparison_gif(
-    gt_seq,
-    pred_seq_true,
-    pred_seq_random,
-    gt_dec=None,
-    save_path="comparison.gif",
-    fps=15,
-):
-    """
-    Inputs:
-    - gt_seq: Ground truth sequence of shape (B, T, H, W, C), uint8, [0, 255]
-    - gt_dec: Decoded ground truth sequence of shape (B, T, H, W, C), uint8, [0, 255]
-    - pred_seq_true: Decoded predictions using true actions of shape (B, T, H, W, C), uint8, [0, 255]
-    - pred_seq_random: Decoded predictions using random actions of shape (B, T, H, W, C), uint8, [0, 255]
-    Create a three-column visualization:
-    - Left: Ground truth observations
-    - Middle: Decoded predictions using true actions
-    - Right: Decoded predictions using random actions
-
-    Display min(batch_size, 4) rows of sequences.
-    """
-    b = gt_seq.shape[0]
-    num_rows = min(b, 4)
-
-    if gt_dec is not None:
-        seq_length = min(
-            gt_seq.shape[1],
-            gt_dec.shape[1],
-            pred_seq_true.shape[1],
-            pred_seq_random.shape[1],
-        )
-    else:
-        seq_length = min(
-            gt_seq.shape[1], pred_seq_true.shape[1], pred_seq_random.shape[1]
-        )
-
-    img_height, img_width = gt_seq.shape[2], gt_seq.shape[3]
-
-    # Determine number of columns (3 or 4 depending on if gt_dec is provided)
-    num_cols = 4 if gt_dec is not None else 3
-    padding = 0
-    title_height = 15
-
-    titles = ["GT"]
-    if gt_dec is not None:
-        titles.append("Dec GT")
-    titles.extend(["GT Act", "Rand Act"])
-
-    frames = []
-    for t in range(seq_length):
-        # Create a black canvas
-        canvas_height = title_height + num_rows * (img_height + padding) + padding
-        canvas_width = num_cols * (img_width + padding) + padding
-        canvas = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
-
-        # Add column titles
-        for col, title in enumerate(titles):
-            col_x = padding + col * (img_width + padding) + img_width // 2
-            # Get text size for proper centering
-            (text_width, _), _ = cv2.getTextSize(
-                title, cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1
-            )
-            cv2.putText(
-                canvas,
-                title,
-                (col_x - text_width // 2, title_height - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.3,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-        for row in range(num_rows):
-            # Base y-coordinate for this row
-            base_y = title_height + padding + row * (img_height + padding)
-
-            # Ground truth (first column)
-            gt_frame = to3channels(gt_seq[row, t])  # Shape should be (H, W, C)
-            canvas[base_y : base_y + img_height, padding : padding + img_width] = (
-                gt_frame
-            )
-
-            col_idx = 1
-
-            # Decoded ground truth (optional second column)
-            if gt_dec is not None:
-                gt_dec_frame = to3channels(gt_dec[row, t])
-                col_x = padding + col_idx * (img_width + padding)
-                canvas[base_y : base_y + img_height, col_x : col_x + img_width] = (
-                    gt_dec_frame
-                )
-                col_idx += 1
-
-            # Prediction with true actions
-            pred_true_frame = to3channels(pred_seq_true[row, t])
-            col_x = padding + col_idx * (img_width + padding)
-            canvas[base_y : base_y + img_height, col_x : col_x + img_width] = (
-                pred_true_frame
-            )
-            col_idx += 1
-
-            # Prediction with random actions
-            pred_random_frame = to3channels(pred_seq_random[row, t])
-            col_x = padding + col_idx * (img_width + padding)
-            canvas[base_y : base_y + img_height, col_x : col_x + img_width] = (
-                pred_random_frame
-            )
-
-        # Add timestep indicator in the bottom right corner
-        (text_width, text_height), _ = cv2.getTextSize(
-            f"t={t}", cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1
-        )
-        text_x = canvas_width - text_width - 10  # 10px margin from right edge
-        text_y = canvas_height - 10  # 10px margin from bottom edge
-        cv2.putText(
-            canvas,
-            f"t={t}",
-            (text_x, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.3,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-        frames.append(canvas)
-
-    # Save as GIF
-    imageio.mimsave(save_path, frames, fps=fps, loop=0)
-    logger.info(f"   ✓ Saved comparison GIF: {os.path.basename(save_path)}")
-
-    return frames
-
-
 ### Main planning eval loop ###
 def main_eval(
     plan_cfg,
@@ -337,7 +203,6 @@ def main_eval(
             os.makedirs(ep_plan_vis_dir, exist_ok=True)
 
         if plan_cfg.task_specification.goal_source == "dset":
-            # TODO
             obs_slice, a, loc, _, _ = next(iter(loader))
             # obs, init_loc = obs_slice[0], loc[0]
             # goal_img, goal_loc = obs_slice[-1], loc[-1]  # [C, H, W] uint8 tensor
@@ -431,23 +296,33 @@ def main_eval(
         successes.append(success)
         distances.append(state_dist)
 
-        coord_diffs, _repr_diffs = agent.analyze_distances(
-            episode_observations[-1],
-            episode_infos[-1],
-            str(ep_folder / "agent"),
-        )
-        agent.plot_losses(
-            prev_losses,
-            prev_elite_losses_mean,
-            prev_elite_losses_std,
-            work_dir=ep_folder,
-        )
-        save_path = f"{ep_folder}/agent_steps_{'succ' if success else 'fail'}.gif"
+        if plan_cfg.logging.get("optional_plots", True):
+            analyze_distances(
+                episode_observations[-1],
+                episode_infos[-1],
+                str(ep_folder / "agent"),
+                goal_position=agent.goal_position,
+                goal_state=agent.goal_state,
+                normalizer=agent.normalizer,
+                model=agent.model,
+                objective=agent.objective,
+                device=agent.device,
+            )
+            plot_losses(
+                prev_losses,
+                prev_elite_losses_mean,
+                prev_elite_losses_std,
+                work_dir=ep_folder,
+                num_act_stepped=agent.num_act_stepped,
+            )
+            save_path = f"{ep_folder}/agent_steps_{'succ' if success else 'fail'}.gif"
         save_gif(
             episode_observations[-1],
             save_path=save_path,
             show_frame_numbers=True,
             fps=20,
+            init_frame=observations[0],
+            goal_frame=goal_img,
         )
         logger.info(f"GIF saved to {save_path}")
         episode_end_time = time.time()  # Add this line
@@ -533,31 +408,39 @@ class GCAgent:
 
     def unroll(self, obs_init, actions, repeat_batch=True):
         """
-        Called by self.planner.cost_function()
-        actions: B A T
-        obs_init: B C T H W
+        Unroll the model for planning.
+
+        Args:
+            obs_init: [B, C, T, H, W]
+            actions: [B, A, T]
+
+        Returns:
+            predicted_states: [B, D, T, H, W]
         """
         batch_size = actions.shape[0]
         nsteps = actions.shape[2]
         if repeat_batch:
             obs_init = obs_init.repeat(batch_size, 1, 1, 1, 1)
-        # unroll_time_start = time.time()
-        predicted_states = self.model.unrolln(
+        predicted_states, _ = self.model.unroll(
             obs_init,
             actions,
-            nsteps,
+            nsteps=nsteps,
+            unroll_mode="autoregressive",
             ctxt_window_time=self.plan_cfg["ctxt_window_time"] if self.plan_cfg else 1,
+            compute_loss=False,
+            return_all_steps=False,
         )
-        # logging.info(f"unroll time: {time.time() - unroll_time_start:.4f}s")
         return predicted_states
 
     def decode_loc_to_pixel(self, predicted_encs, wall_x=None, door_y=None):
         """
         Decode the predicted encodings into frames.
+
         Args:
-            predicted_encs: Tensor of shape (B, D, T, H, W)
+            predicted_encs: [B, D, T, H, W]
+
         Returns:
-            np.array of shape (B, T, H, W, C) on cpu for visualization.
+            np.array of shape [B, T, H, W, C] on cpu for visualization.
         """
         assert self.loc_prober is not None
         B, D, T, H, W = predicted_encs.shape
@@ -580,137 +463,6 @@ class GCAgent:
         self._prev_elite_losses_std = planning_result.prev_elite_losses_std
         return planning_result.actions[: self.num_act_stepped]  # T, A
 
-    def plot_losses(
-        self, losses, elite_losses_mean, elite_losses_std, work_dir, frameskip=1
-    ):
-        """
-        Input:
-            prev_losses, List[Tensor, size= (n_opt_steps, n_losses)].
-        For now, n_losses = 1.
-        """
-        losses = torch.stack(losses, dim=0).detach().cpu().numpy()
-        elite_losses_mean = torch.stack(elite_losses_mean, dim=0).detach().cpu().numpy()
-        elite_losses_std = torch.stack(elite_losses_std, dim=0).detach().cpu().numpy()
-        n_timesteps, n_opt_steps, n_losses = losses.shape
-        sns.set_theme()
-        for i in range(n_losses):
-            total_plots = min(16, n_timesteps)
-            rows = 1
-            cols = int(np.ceil(total_plots / rows))
-            fig_width = FIGSIZE_BASE[0] * cols
-            fig_height = FIGSIZE_BASE[1] * rows
-            plt.figure(figsize=(fig_width, fig_height), dpi=300)
-            steps = np.linspace(0, n_timesteps - 1, total_plots, dtype=int)
-            for j, step in enumerate(steps):
-                ax = plt.subplot(rows, cols, j + 1)
-                if n_opt_steps > 1:
-                    sns.lineplot(data=losses[step, :, i])
-                    sns.lineplot(data=elite_losses_mean[step, :, i])
-                    ax.fill_between(
-                        range(n_opt_steps),
-                        elite_losses_mean[step, :, i] - elite_losses_std[step, :, i],
-                        elite_losses_mean[step, :, i] + elite_losses_std[step, :, i],
-                        alpha=0.3,
-                    )
-                else:
-                    ax.bar(
-                        0, losses[step, 0, i]
-                    )  # Plot a bar chart if only one opt step
-                    ax.bar(0, elite_losses_mean[step, 0, i])
-                    ax.errorbar(
-                        0,
-                        elite_losses_mean[step, 0, i],
-                        yerr=elite_losses_std[step, 0, i],
-                        fmt="none",
-                        capsize=5,
-                    )
-                ax.set_title(f"Episode step {step * frameskip * self.num_act_stepped}")
-                ax.tick_params(axis="both")
-                ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
-            plt.tight_layout()
-            plt.savefig(work_dir / f"losses_{i}.pdf", bbox_inches="tight")
-            plt.close()
-
-    def analyze_distances(
-        self,
-        obses,
-        infos,
-        plot_prefix,
-    ):
-        """
-        Input:
-            obses: Tensor: [B, c, h, w] with B = env.max_episode_steps + 1
-        """
-        # TODO: have a more general signal than dot_position, which is specific to dot envs,
-        # called proprioception, allowed by an
-        # env wrapper wrapping all possible envs.
-        coords = torch.stack([x["dot_position"] for x in infos]).unsqueeze(1)  # B 1 c
-        distances = (
-            torch.norm(
-                coords[..., -1, :3] - self.goal_position[:3].unsqueeze(0), dim=-1
-            )
-            .detach()
-            .cpu()
-        )
-        sns.set_theme()
-        FIGSIZE = (4.0, 3.0)
-        self.plot_distances(distances, plot_prefix + "_distances.pdf", figsize=FIGSIZE)
-
-        # Normalizer takes [.. c h w]
-        all_states = (
-            self.normalizer.normalize_state(
-                torch.cat([obses, self.goal_state.unsqueeze(0)])
-            )
-            .unsqueeze(-3)
-            .to(self.device)
-        )  # B c 1 h w
-        # The encoder takes batch of single states, of dim [len_ep, C, H, W] so no temporal dependency
-        all_encs = self.model.encode(all_states)  # B d 1 h w
-        diffs = self.compute_embed_differences(all_encs).detach().cpu()
-        self.plot_distances(
-            diffs,
-            plot_prefix + "_rep_distance_visual.pdf",
-            figsize=FIGSIZE,
-            xlabel="Timesteps",
-            ylabel="Rep distance to goal",
-        )
-
-        all_encs_excluded = all_encs[:-1]
-        all_objectives = self.objective(all_encs_excluded).detach().cpu()
-        self.plot_distances(
-            all_objectives,
-            plot_prefix + "_objectives.pdf",
-            figsize=FIGSIZE,
-            xlabel="Timesteps",
-            ylabel="Objective values",
-        )
-
-        return distances, diffs
-
-    def plot_distances(
-        self,
-        data,
-        plot_prefix="",
-        figsize=(4.0, 3.0),
-        xlabel="Timesteps",
-        ylabel="Distance to goal",
-    ):
-        plt.figure(figsize=figsize, dpi=300)
-        sns.lineplot(data=data)
-        plt.xlabel(xlabel)
-        plt.ylabel(ylabel)
-        plt.tight_layout()
-        plt.savefig(plot_prefix, bbox_inches="tight")
-        plt.close()
-
-    def compute_embed_differences(self, all_encs):
-        """
-        Input: all_encs:
-            visual: [T D 1 H W]
-        """
-        sq_diff = (all_encs[:-1] - all_encs[-1:]) ** 2
-        return sq_diff.mean(dim=tuple(range(1, all_encs.ndim)))
-
 
 ### Planning objectives to minimize ###
 class ReprTargetDistMPCObjective:
@@ -728,10 +480,11 @@ class ReprTargetDistMPCObjective:
     def __call__(self, encodings: torch.Tensor, keepdims: bool = False) -> torch.Tensor:
         """
         Args:
-            encodings: tensor (B D T H W)
-            target_enc: tensor (B D T H W)
+            encodings: [B, D, T, H, W]
+            keepdims: if True, return [B, T], else return [B]
+
         Returns:
-            diff: tensor, (B T) or (B) if sum_all_diffs or not keepdims
+            diff: [B, T] else [B] if sum_all_diffs or not keepdims
         """
         if self.sum_all_diffs:
             keepdims = True
@@ -780,117 +533,6 @@ class Planner(ABC):
     ) -> torch.Tensor:
         predicted_encs = self.unroll(obs_init, actions)
         return self.objective(predicted_encs)
-
-    def save_decoded_frames(
-        self, pred_frames_over_iterations, costs, plan_vis_path, overlay=True
-    ):
-        # costs: List[float] of length iterations
-        # pred_frames_over_iterations: List[(T, H, W, C)] of length iterations
-        if pred_frames_over_iterations is not None and plan_vis_path is not None:
-            pass
-
-            frames = []
-            global_min_cost = np.min(costs)
-            global_max_cost = np.max(costs)
-            # Pre-calculate the normalized positions for all costs
-            all_normalized_costs = []
-            for i in range(len(costs)):
-                # For each iteration, normalize all costs seen so far
-                current_costs = costs[: i + 1]
-                if len(current_costs) > 1:
-                    # Normalize using global min/max for consistent scaling
-                    normalized = (current_costs - global_min_cost) / (
-                        global_max_cost - global_min_cost + 1e-10
-                    )
-                    all_normalized_costs.append(normalized)
-                else:
-                    all_normalized_costs.append(
-                        np.array([0.5])
-                    )  # Default for single value
-
-            for i, pred_frames in enumerate(pred_frames_over_iterations):
-                # pred_frames.shape: (T, H, W, C)
-                if overlay:
-                    overlay_frames = []
-                    for frame_idx, frame in enumerate(pred_frames):
-                        # Create a copy of the frame to draw on
-                        frame_with_overlay = frame.copy()
-
-                        # Get frame dimensions
-                        h, w = frame.shape[0], frame.shape[1]
-
-                        # Calculate scale factors for dimensions
-                        scale_factor = min(h, w) / 1000  # Base scale on 500px reference
-                        font_scale = max(0.3, scale_factor * 0.5)
-                        line_thickness = max(1, int(scale_factor))
-                        margin = int(h * 0.02)  # 2% of height
-
-                        # Get normalized costs for this iteration
-                        current_costs = costs[: i + 1]
-                        if len(current_costs) > 1:
-                            normalized_costs = all_normalized_costs[i]
-                            # Map to pixel space (top is low cost, bottom is high cost)
-                            top_margin = int(h * 0.05)  # 5% from top
-                            bottom_margin = int(h * 0.05)  # 5% from bottom
-                            y_positions = (1 - normalized_costs) * (
-                                h - top_margin - bottom_margin
-                            ) + top_margin
-
-                        # Add text showing the iteration number
-                        cv2.putText(
-                            frame_with_overlay,
-                            f"Iter {i+1}",
-                            (margin, margin + int(h * 0.1)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            font_scale,
-                            (200, 200, 200),
-                            line_thickness,
-                        )
-
-                        overlay_frames.append(frame_with_overlay)
-                    frames.extend(overlay_frames)
-                else:
-                    plt.clf()
-                    plt.figure(figsize=(10, 10))
-                    plt.plot(costs[: i + 1])
-                    plt.title(f"Iteration {i}")
-                    plt.xlabel("Iteration")
-                    plt.ylabel("Loss")
-                    plt.xlim(0, len(costs))
-                    plt.ylim(min(costs), max(costs))
-                    buf = BytesIO()
-                    plt.savefig(buf, format="png")
-                    buf.seek(0)
-                    img = Image.open(buf)
-                    img = np.array(img)
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    img = cv2.resize(img, (256, 256))
-
-                    combined_frames = []
-                    for frame in pred_frames:
-                        frame = cv2.resize(frame, (256, 256))
-                        combined_frame = np.concatenate((img, frame), axis=1)
-                        combined_frames.append(combined_frame)
-                    frames.extend(combined_frames)
-            # Save GIF
-            filename = f"{plan_vis_path}.gif"
-            save_gif_HWC(frames, filename, fps=30)
-            logger.info(f"Plan decoding video saved to {plan_vis_path}")
-
-            # Save last iteration frames as PDF
-            last_pred_frames = pred_frames_over_iterations[-1]
-            pdf_filename = f"{plan_vis_path}_last_frames.pdf"
-            n_frames = len(last_pred_frames)
-            show_images(
-                last_pred_frames.transpose(0, 3, 1, 2),
-                nrow=n_frames,
-                titles=None,
-                save_path=pdf_filename,
-                close_fig=True,
-                first_channel_only=False,
-                clamp=False,
-            )
-            logger.info(f"Last iteration frames saved to {pdf_filename}")
 
 
 ### Specific planning optimizers ###
@@ -1003,7 +645,7 @@ class CEMPlanner(Planner):
                 pred_frames_over_iterations.append(pred_frames.squeeze(0))
                 # [T H W 3]: uint 8 in [0, 255]
         if self.decode_each_iteration:
-            self.save_decoded_frames(pred_frames_over_iterations, losses, plan_vis_path)
+            save_decoded_frames(pred_frames_over_iterations, losses, plan_vis_path)
 
         # Return the first action(s)
         a = mean
@@ -1025,7 +667,6 @@ class MPPIPlanner(Planner):
         plan_length: int = 15,
         action_dim: int = 2,
         max_std: float = 2,
-        min_std: float = 0.05,
         num_elites: int = 64,
         temperature: float = 0.005,
         max_norms: Optional[List[float]] = None,
@@ -1041,7 +682,6 @@ class MPPIPlanner(Planner):
         self.action_dim = action_dim
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.max_std = max_std
-        self.min_std = min_std
         self.num_elites = num_elites
         self.temperature = temperature
         self.max_norms = max_norms
@@ -1137,7 +777,7 @@ class MPPIPlanner(Planner):
                 pred_frames_over_iterations.append(pred_frames.squeeze(0))
                 # [T H W 3]: uint 8 in [0, 255]
         if self.decode_each_iteration:
-            self.save_decoded_frames(pred_frames_over_iterations, losses, plan_vis_path)
+            save_decoded_frames(pred_frames_over_iterations, losses, plan_vis_path)
         # Select action
         score = score.cpu().numpy()
         actions = elite_actions[

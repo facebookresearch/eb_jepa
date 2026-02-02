@@ -1,0 +1,61 @@
+# Image JEPA (VICReg/BCS) Training Configuration
+# Train a self-supervised image representation model on CIFAR-10
+
+meta:
+  seed: 42
+  device: auto  # auto, cuda, or cpu
+
+data:
+  dataset: cifar10
+  batch_size: 256
+  num_workers: 4
+
+model:
+  # Backbone
+  type: resnet       # resnet, vit_s, vit_b
+  patch_size: 2      # For ViT only
+
+  # Projector
+  use_projector: true
+  proj_hidden_dim: 2048
+  proj_output_dim: 2048
+
+loss:
+  type: vicreg       # vicreg or bcs
+  # VICReg loss weights
+  std_coeff: 1.0
+  cov_coeff: 80.0
+  # BCS loss weight (only used if type=bcs)
+  lmbd: 10.0
+
+optim:
+  epochs: 300
+  lr: 0.3
+  weight_decay: 1.0e-4
+  warmup_epochs: 10
+  warmup_start_lr: 3.0e-5
+  min_lr: 0.0
+
+logging:
+  log_wandb: true
+  wandb_group:        # Set to group runs (e.g., for seed averaging)
+  log_every: 10       # Log every N epochs
+  save_every: 50      # Save checkpoint every N epochs
+  tqdm_silent: false  # Disable tqdm progress bars
+
+training:
+  use_amp: true      # Use automatic mixed precision
+  dtype: bfloat16     # float16 or bfloat16
+
+# --- Parameters used when running with --full-sweep
+# By default, only the parameters specified above are used
+sweep:
+  # Default sweep grid for VICReg hyperparameter search
+  param_grid:
+    data.batch_size: [256]
+    model.use_projector: [true, false]
+    model.proj_hidden_dim: [64, 128, 256, 512, 1024, 2048, 4096]
+    model.proj_output_dim: [64, 128, 256, 512, 1024, 2048, 4096]
+    loss.std_coeff: [1.0, 10.0, 100.0]
+    loss.cov_coeff: [0.1, 1.0, 10.0, 100.0]
+    meta.seed: [1, 1000, 10000]

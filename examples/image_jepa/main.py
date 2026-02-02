@@ -3,53 +3,88 @@ CIFAR-10 VICReg Training Script - Native PyTorch Implementation
 
 This script implements VICReg training on CIFAR-10 dataset using only PyTorch and torchvision.
 Supports both ResNet and Vision Transformer (ViT) backbones.
+
+Usage:
+    # With YAML config:
+    python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/default.yaml
+
+    # With config + overrides:
+    python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/default.yaml optim.epochs=50
 """
 
 import os
 import time
-import argparse
+from pathlib import Path
+
+import fire
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import torchvision
-from torchvision.datasets import CIFAR10
-from torch.optim.optimizer import required
-from torchvision.models import VisionTransformer
 import wandb
+from omegaconf import OmegaConf
+from torch.amp import GradScaler, autocast
+from torch.optim.optimizer import required
+from torch.utils.data import DataLoader
+from torchvision.datasets import CIFAR10
+from torchvision.models import VisionTransformer
 from tqdm import tqdm
-from torch.amp import autocast, GradScaler
 
-from eb_jepa.losses import VICRegLoss, BCS
-from examples.image_jepa.dataset import get_train_transforms, get_val_transforms, ImageDataset
+from eb_jepa.logging import get_logger
+from eb_jepa.losses import BCS, VICRegLoss
+from eb_jepa.training_utils import (
+    get_default_dev_name,
+    get_exp_name,
+    get_unified_experiment_dir,
+    load_checkpoint,
+    load_config,
+    log_config,
+    log_data_info,
+    log_epoch,
+    log_model_info,
+    save_checkpoint,
+    setup_device,
+    setup_seed,
+    setup_wandb,
+)
+from examples.image_jepa.dataset import (
+    ImageDataset,
+    get_train_transforms,
+    get_val_transforms,
+)
 from examples.image_jepa.eval import LinearProbe, evaluate_linear_probe
+
+logger = get_logger(__name__)
 
 
 class ResNet18(nn.Module):
     """ResNet-18 backbone implementation."""
-    
+
     def __init__(self):
         super().__init__()
         self.backbone = torchvision.models.resnet18()
         self.backbone.fc = nn.Identity()  # Remove final classification layer
-        self.backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
+        self.backbone.conv1 = nn.Conv2d(
+            3, 64, kernel_size=3, stride=1, padding=2, bias=False
+        )
         self.backbone.maxpool = nn.Identity()
         self.features_dim = 512
 
-        
     def forward(self, x):
         return self.backbone(x)
 
 
 class ImageSSL(nn.Module):
     """Image Self-Supervised Learning model implementation."""
-    
-    def __init__(self, backbone, features_dim, proj_hidden_dim=2048, proj_output_dim=2048):
+
+    def __init__(
+        self, backbone, features_dim, proj_hidden_dim=2048, proj_output_dim=2048
+    ):
         super().__init__()
         self.backbone = backbone
         self.features_dim = features_dim
-        
+
         # Projector
         self.projector = nn.Sequential(
             nn.Linear(features_dim, proj_hidden_dim),
@@ -60,7 +95,7 @@ class ImageSSL(nn.Module):
             nn.ReLU(),
             nn.Linear(proj_hidden_dim, proj_output_dim),
         )
-        
+
     def forward(self, x):
         features = self.backbone(x)
         projections = self.projector(features)
@@ -69,7 +104,7 @@ class ImageSSL(nn.Module):
 
 class LARS(optim.Optimizer):
     """LARS optimizer implementation."""
-    
+
     def __init__(
         self,
         params,
@@ -142,7 +177,9 @@ class LARS(optim.Optimizer):
                 # lars scaling + weight decay part
                 if p.ndim != 1 or not group["exclude_bias_n_norm"]:
                     if p_norm != 0 and g_norm != 0:
-                        lars_lr = p_norm / (g_norm + p_norm * weight_decay + group["eps"])
+                        lars_lr = p_norm / (
+                            g_norm + p_norm * weight_decay + group["eps"]
+                        )
                         lars_lr *= group["eta"]
 
                         # clip lr
@@ -172,324 +209,405 @@ class LARS(optim.Optimizer):
 
 class WarmupCosineScheduler:
     """Warmup cosine learning rate scheduler"""
-    
-    def __init__(self, optimizer, warmup_epochs, max_epochs, base_lr, min_lr=0.0, warmup_start_lr=3e-5):
+
+    def __init__(
+        self,
+        optimizer,
+        warmup_epochs,
+        max_epochs,
+        base_lr,
+        min_lr=0.0,
+        warmup_start_lr=3e-5,
+    ):
         self.optimizer = optimizer
         self.warmup_epochs = warmup_epochs
         self.max_epochs = max_epochs
         self.base_lr = base_lr
         self.min_lr = min_lr
         self.warmup_start_lr = warmup_start_lr
-        
+
     def step(self, epoch):
         if epoch < self.warmup_epochs:
-            lr = self.warmup_start_lr + epoch * (self.base_lr - self.warmup_start_lr) / (self.warmup_epochs - 1)
+            lr = self.warmup_start_lr + epoch * (
+                self.base_lr - self.warmup_start_lr
+            ) / (self.warmup_epochs - 1)
         else:
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + torch.cos(torch.tensor((epoch - self.warmup_epochs) / (self.max_epochs - self.warmup_epochs) * 3.14159)))
-        
+            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (
+                1
+                + torch.cos(
+                    torch.tensor(
+                        (epoch - self.warmup_epochs)
+                        / (self.max_epochs - self.warmup_epochs)
+                        * 3.14159
+                    )
+                )
+            )
+
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
+            param_group["lr"] = lr
 
 
-def train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler, device, epoch, loss_fn, use_amp=True):
+def train_epoch(
+    model,
+    train_loader,
+    optimizer,
+    scheduler,
+    linear_probe,
+    scaler,
+    device,
+    epoch,
+    loss_fn,
+    use_amp=True,
+    dtype=torch.float16,
+    tqdm_silent=False,
+):
     """Train for one epoch."""
     model.train()
     linear_probe.train()
-    
+
     # Dynamic loss accumulator
     loss_totals = {}
     total_linear_loss = 0
     linear_correct = 0
     linear_total = 0
-    
-    pbar = tqdm(train_loader, desc=f'Epoch {epoch}')
+
+    pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=tqdm_silent)
     for batch_idx, (views, target) in enumerate(pbar):
-        view1, view2 = views[0].to(device, non_blocking=True), views[1].to(device, non_blocking=True)
+        view1, view2 = views[0].to(device, non_blocking=True), views[1].to(
+            device, non_blocking=True
+        )
         target = target.to(device, non_blocking=True)
 
-        with autocast('cuda', enabled=use_amp):
+        with autocast(device.type, enabled=use_amp, dtype=dtype):
             features, z1 = model(view1)
-            _, z2 = model(view2)          
+            _, z2 = model(view2)
             loss_dict = loss_fn(z1, z2)
             loss = loss_dict["loss"]
-        
+
         with torch.no_grad():
             features_frozen = features.detach().float()
-        
+
         linear_outputs = linear_probe(features_frozen)
         linear_loss = F.cross_entropy(linear_outputs, target)
-        
+
         _, predicted = linear_outputs.max(1)
         linear_correct_batch = predicted.eq(target).sum().item()
-        
+
         total_loss_batch = loss + linear_loss
-        
+
         optimizer.zero_grad()
         scaler.scale(total_loss_batch).backward()
         scaler.step(optimizer)
         scaler.update()
-        
+
         # Update metrics dynamically based on loss_dict keys
         for key, value in loss_dict.items():
             if key not in loss_totals:
                 loss_totals[key] = 0
             loss_totals[key] += value.item()
         total_linear_loss += linear_loss.item()
-        
+
         # Update linear probe accuracy (pre-computed under autocast)
         linear_total += target.size(0)
         linear_correct += linear_correct_batch
-        
+
         # Update progress bar
-        pbar.set_postfix({
-            'Loss': f'{loss.item():.4f}',
-            'Linear': f'{linear_loss.item():.4f}',
-            'Acc': f'{100.*linear_correct/linear_total:.2f}%'
-        })
-    
+        pbar.set_postfix(
+            {
+                "Loss": f"{loss.item():.4f}",
+                "Linear": f"{linear_loss.item():.4f}",
+                "Acc": f"{100.*linear_correct/linear_total:.2f}%",
+            }
+        )
+
     # Update learning rate
     scheduler.step(epoch)
-    
+
     # Build return dict dynamically
     num_batches = len(train_loader)
     metrics = {key: total / num_batches for key, total in loss_totals.items()}
-    metrics['linear_loss'] = total_linear_loss / num_batches
-    metrics['linear_acc'] = 100.0 * linear_correct / linear_total
-    
+    metrics["linear_loss"] = total_linear_loss / num_batches
+    metrics["linear_acc"] = 100.0 * linear_correct / linear_total
+
     return metrics
 
 
-def create_base_parser(description='Image SSL Training on CIFAR-10'):
-    """Create base argument parser with common arguments.
-    
-    This can be extended by other scripts to add their own arguments.
+def run(
+    fname: str = "examples/image_jepa/cfgs/default.yaml",
+    cfg=None,
+    folder=None,
+    **overrides,
+):
     """
-    parser = argparse.ArgumentParser(description=description)
-    
-    # Training parameters
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
-    parser.add_argument('--learning_rate', type=float, default=0.3, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay')
-    parser.add_argument('--warmup_epochs', type=int, default=10, help='Number of warmup epochs')
-    parser.add_argument('--warmup_start_lr', type=float, default=3e-5, help='Starting learning rate for warmup')
-    
-    # Model parameters
-    parser.add_argument('--model_type', type=str, choices=['resnet', 'vit_s', 'vit_b'], default='resnet', help='Type of encoder')
-    parser.add_argument('--patch_size', type=int, default=2, help='Patch size for ViT')
-    parser.add_argument('--proj_hidden_dim', type=int, default=2048, help='Projector hidden dimension')
-    parser.add_argument('--proj_output_dim', type=int, default=2048, help='Projector output dimension')
-    parser.add_argument('--use_projector', type=int, default=1, help='Whether to use projector (default: True)')
-    
-    # Data parameters
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loader workers')
-    parser.add_argument('--data_dir', type=str, default='./datasets', help='Directory to store datasets')
-    
-    # Logging parameters
-    parser.add_argument('--project_name', type=str, default='eb-jepa-image-ssl', help='Wandb project name')
-    parser.add_argument('--log_interval', type=int, default=10, help='Logging interval in epochs')
-    parser.add_argument('--save_interval', type=int, default=50, help='Checkpoint saving interval in epochs')
-    
-    # Other parameters
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--device', type=str, default='auto', help='Device to use (auto, cuda, cpu)')
-    parser.add_argument('--no_amp', action='store_true', help='Disable mixed precision training (enabled by default)')
-    
-    return parser
+    Train an Image JEPA (VICReg/BCS) model on CIFAR-10.
 
+    Args:
+        fname: Path to YAML config file
+        cfg: Pre-loaded config object (optional, overrides config file)
+        folder: Experiment folder path (optional, auto-generated if not provided)
+        **overrides: Config overrides in dot notation (e.g., optim.epochs=50)
+    """
+    # Load config
+    if cfg is None:
+        cfg = load_config(fname, overrides if overrides else None)
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = create_base_parser()
-    
-    # Loss function selection
-    parser.add_argument('--loss_type', type=str, choices=['vicreg', 'bcs'], default='vicreg', help='Loss function type')
-    
-    # VICReg-specific loss weights
-    parser.add_argument('--var_loss_weight', type=float, default=1.0, help='Variance loss weight (VICReg)')
-    parser.add_argument('--cov_loss_weight', type=float, default=80.0, help='Covariance loss weight (VICReg)')
-    
-    # BCS-specific loss weight
-    parser.add_argument('--lmbd', type=float, default=10.0, help='BCS loss weight (LE-JEPA)')
-    
-    return parser.parse_args()
+    # Setup using shared utilities
+    device = setup_device(cfg.meta.device)
+    setup_seed(cfg.meta.seed)
 
-
-def main():
-    """Main training function."""
-    args = parse_args()
-    
-    # Print all hyperparameters for run identification in logs
-    print("=" * 60)
-    print("Run Configuration:")
-    print("=" * 60)
-    for key, value in sorted(vars(args).items()):
-        print(f"  {key}={value}")
-    print("=" * 60)
-    
-    # Set device
-    if args.device == 'auto':
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Create experiment directory using unified structure (if not provided)
+    if folder is None:
+        if cfg.meta.get("model_folder"):
+            exp_dir = Path(cfg.meta.model_folder)
+            folder_name = exp_dir.name
+            exp_name = folder_name.rsplit("_seed", 1)[0]
+        else:
+            sweep_name = get_default_dev_name()
+            exp_name = get_exp_name("image_jepa", cfg)
+            exp_dir = get_unified_experiment_dir(
+                example_name="image_jepa",
+                sweep_name=sweep_name,
+                exp_name=exp_name,
+                seed=cfg.meta.seed,
+            )
     else:
-        device = torch.device(args.device)
-    print(f'Using device: {device}')
-    
-    # Set random seed
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(args.seed)
-    
-    wandb.init(
-        project=args.project_name,
-        config=vars(args),
-        name=f'{args.model_type}-{args.loss_type}-{args.seed}'
+        exp_dir = Path(folder)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        # Extract exp_name from folder name by removing _seed{seed} suffix
+        folder_name = exp_dir.name  # e.g., "resnet_vicreg_seed1"
+        exp_name = folder_name.rsplit("_seed", 1)[0]  # e.g., "resnet_vicreg"
+
+    wandb_run = setup_wandb(
+        project="eb_jepa",
+        config={"example": "image_jepa", **OmegaConf.to_container(cfg, resolve=True)},
+        run_dir=exp_dir,
+        run_name=exp_name,
+        tags=["image_jepa", f"seed_{cfg.meta.seed}"],
+        group=cfg.logging.get("wandb_group"),
+        enabled=cfg.logging.log_wandb,
+        sweep_id=cfg.logging.get("wandb_sweep_id"),
     )
-    
-    print("Loading CIFAR-10 dataset...")
+
+    logger.info("Loading CIFAR-10 dataset...")
     transform = get_train_transforms()
-    
+
+    # Use EBJEPA_DSETS environment variable if set, otherwise fall back to config
+    data_dir = os.environ.get("EBJEPA_DSETS")
+    logger.info(f"Using data directory: {data_dir}")
+
     base_train_dataset = CIFAR10(
-        root=args.data_dir,
-        train=True,
-        download=True,
-        transform=None
+        root=data_dir, train=True, download=True, transform=None
     )
-    
+
     train_dataset = ImageDataset(base_train_dataset, transform, num_crops=2)
-    
+
     val_dataset = CIFAR10(
-        root=args.data_dir,
-        train=False,
-        download=True,
-        transform=get_val_transforms()
+        root=data_dir, train=False, download=True, transform=get_val_transforms()
     )
-    
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=cfg.data.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=cfg.data.num_workers,
         pin_memory=True,
-        drop_last=True  # Avoid small batches that cause BatchNorm issues
+        drop_last=True,  # Avoid small batches that cause BatchNorm issues
     )
-    
+
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=cfg.data.batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True
+        num_workers=cfg.data.num_workers,
+        pin_memory=True,
     )
-    
+
+    log_data_info(
+        "CIFAR-10",
+        len(train_loader),
+        cfg.data.batch_size,
+        train_samples=len(train_dataset),
+        val_samples=len(val_dataset),
+    )
+
     # Initialize model
-    print("Initializing model...")
-    if args.model_type == 'resnet':
+    logger.info("Initializing model...")
+    if cfg.model.type == "resnet":
         backbone = ResNet18()
         features_dim = backbone.features_dim
-    elif args.model_type == 'vit_s':
+    elif cfg.model.type == "vit_s":
         features_dim = 384
-        model_kwargs = dict(image_size=32, patch_size=8, hidden_dim=features_dim, num_layers=12, num_heads=6, mlp_dim=4*features_dim)
+        model_kwargs = dict(
+            image_size=32,
+            patch_size=8,
+            hidden_dim=features_dim,
+            num_layers=12,
+            num_heads=6,
+            mlp_dim=4 * features_dim,
+        )
         backbone = VisionTransformer(**model_kwargs)
         backbone.heads = nn.Identity()
-    elif args.model_type == 'vit_b':
+    elif cfg.model.type == "vit_b":
         features_dim = 768
-        model_kwargs = dict(image_size=32, patch_size=8, hidden_dim=features_dim, num_layers=12, num_heads=12, mlp_dim=4*features_dim)
+        model_kwargs = dict(
+            image_size=32,
+            patch_size=8,
+            hidden_dim=features_dim,
+            num_layers=12,
+            num_heads=12,
+            mlp_dim=4 * features_dim,
+        )
         backbone = VisionTransformer(**model_kwargs)
         backbone.heads = nn.Identity()
 
-    model = ImageSSL(backbone, features_dim=features_dim, proj_hidden_dim=args.proj_hidden_dim, proj_output_dim=args.proj_output_dim)
+    model = ImageSSL(
+        backbone,
+        features_dim=features_dim,
+        proj_hidden_dim=cfg.model.proj_hidden_dim,
+        proj_output_dim=cfg.model.proj_output_dim,
+    )
 
-    if not args.use_projector:
+    if not cfg.model.use_projector:
         model.projector = nn.Identity()
-    
+
     model = model.to(device)
-    
+
+    # Log model structure and parameters
+    encoder_params = sum(p.numel() for p in backbone.parameters())
+    projector_params = (
+        sum(p.numel() for p in model.projector.parameters())
+        if cfg.model.use_projector
+        else 0
+    )
+    log_model_info(model, {"encoder": encoder_params, "projector": projector_params})
+
+    # Log configuration
+    log_config(cfg)
+
     # Initialize linear probe
     linear_probe = LinearProbe(feature_dim=features_dim, num_classes=10).to(device)
-    
-    # Initialize mixed precision scaler
-    scaler = GradScaler('cuda')
-    
-    
+
+    # Mixed precision setup
+    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16}
+    use_amp = cfg.training.get("use_amp", True)
+    dtype = dtype_map.get(cfg.training.get("dtype", "float16").lower(), torch.float16)
+    scaler = GradScaler(device.type, enabled=use_amp)
+    logger.info(f"Using AMP with {dtype=}" if use_amp else f"AMP disabled")
+
     optimizer = LARS(
         [
-            {'params': model.parameters(), 'lr': 0.3},
-            {'params': linear_probe.parameters(), 'lr': 0.1} # Initialize linear probe parameters
+            {"params": model.parameters(), "lr": cfg.optim.lr},
+            {"params": linear_probe.parameters(), "lr": 0.1},  # Linear probe parameters
         ],
-        weight_decay=1e-4,
+        weight_decay=cfg.optim.weight_decay,
         eta=0.02,
         clip_lr=True,
         exclude_bias_n_norm=True,
-        momentum=0.9
+        momentum=0.9,
     )
-    
+
     scheduler = WarmupCosineScheduler(
         optimizer,
-        warmup_epochs=args.warmup_epochs,
-        max_epochs=args.epochs,
-        base_lr=args.learning_rate,
-        min_lr=0.0,
-        warmup_start_lr=args.warmup_start_lr
+        warmup_epochs=cfg.optim.warmup_epochs,
+        max_epochs=cfg.optim.epochs,
+        base_lr=cfg.optim.lr,
+        min_lr=cfg.optim.min_lr,
+        warmup_start_lr=cfg.optim.warmup_start_lr,
     )
-    
+
     # Initialize loss function
-    if args.loss_type == 'vicreg':
-        loss_fn = VICRegLoss(
-            var_loss_weight=args.var_loss_weight,
-            cov_loss_weight=args.cov_loss_weight
-        )
-    elif args.loss_type == 'bcs':
-        loss_fn = BCS(lmbd=args.lmbd)
-    
+    if cfg.loss.type == "vicreg":
+        loss_fn = VICRegLoss(std_coeff=cfg.loss.std_coeff, cov_coeff=cfg.loss.cov_coeff)
+    elif cfg.loss.type == "bcs":
+        loss_fn = BCS(lmbd=cfg.loss.lmbd)
+
+    # Load checkpoint if requested
+    start_epoch = 0
+    if cfg.meta.get("load_model"):
+        ckpt_path = exp_dir / cfg.meta.get("load_checkpoint", "latest.pth.tar")
+        ckpt_info = load_checkpoint(ckpt_path, model, optimizer, device=device)
+        start_epoch = ckpt_info.get("epoch", 0)
+        if "linear_probe_state_dict" in ckpt_info:
+            linear_probe.load_state_dict(ckpt_info["linear_probe_state_dict"])
+
     # Training loop
-    print("Starting training...")
+    logger.info(f"Starting training for {cfg.optim.epochs} epochs...")
     start_time = time.time()
-    
-    for epoch in range(args.epochs):
+    use_amp = cfg.training.get("use_amp", True)
+    tqdm_silent = cfg.logging.get("tqdm_silent", False)
+
+    for epoch in range(start_epoch, cfg.optim.epochs):
         # Train
-        train_metrics = train_epoch(model, train_loader, optimizer, scheduler, linear_probe, scaler, device, epoch, 
-                                   loss_fn, not args.no_amp)
-        
+        train_metrics = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            scheduler,
+            linear_probe,
+            scaler,
+            device,
+            epoch,
+            loss_fn,
+            use_amp,
+            dtype,
+            tqdm_silent,
+        )
+
         # Evaluate linear probe on validation set
-        val_acc, val_loss = evaluate_linear_probe(model, linear_probe, val_loader, device, not args.no_amp)
-        
+        val_acc, val_loss = evaluate_linear_probe(
+            model, linear_probe, val_loader, device, use_amp
+        )
+
         # Log metrics - dynamically add train_ prefix to all train_metrics keys
-        log_dict = {'epoch': epoch}
+        log_dict = {"epoch": epoch}
         for key, value in train_metrics.items():
-            log_dict[f'train_{key}'] = value
-        log_dict['val_loss'] = val_loss
-        log_dict['val_acc'] = val_acc
-        log_dict['learning_rate'] = optimizer.param_groups[0]['lr']
-        
-        wandb.log(log_dict)
-        
-        # Print progress
-        if epoch % args.log_interval == 0:
+            log_dict[f"train_{key}"] = value
+        log_dict["val_loss"] = val_loss
+        log_dict["val_acc"] = val_acc
+        log_dict["learning_rate"] = optimizer.param_groups[0]["lr"]
+
+        if wandb_run:
+            wandb.log(log_dict)
+
+        # Log progress
+        if epoch % cfg.logging.log_every == 0:
             elapsed = time.time() - start_time
-            metrics_str = ' | '.join(f'{k}: {v:.4f}' for k, v in train_metrics.items())
-            print(f'Epoch {epoch:4d} | {metrics_str} | '
-                  f'Linear Val: {val_acc:.2f}% | '
-                  f'LR: {optimizer.param_groups[0]["lr"]:.6f} | '
-                  f'Time: {elapsed:.1f}s')
-        
+            log_epoch(
+                epoch,
+                {
+                    "loss": train_metrics["loss"],
+                    "val_acc": val_acc,
+                    "lr": optimizer.param_groups[0]["lr"],
+                },
+                total_epochs=cfg.optim.epochs,
+                elapsed_time=elapsed,
+            )
+
         # Save checkpoint
-        if epoch % args.save_interval == 0:
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'linear_probe_state_dict': linear_probe.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
-                'scheduler_state_dict': scheduler,
-                'loss': train_metrics['loss'],
-                'linear_val_acc': val_acc
-            }
-            os.makedirs('examples/image_jepa/trained_models/', exist_ok=True)
-            torch.save(checkpoint, f'examples/image_jepa/trained_models/checkpoint_epoch_{epoch}.pth')
-    
-    print("Training completed!")
-    wandb.finish()
+        save_checkpoint(
+            exp_dir / "latest.pth.tar",
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch,
+            scaler=scaler,
+            linear_probe_state_dict=linear_probe.state_dict(),
+            linear_val_acc=val_acc,
+        )
+        if epoch % cfg.logging.save_every == 0 and epoch > 0:
+            save_checkpoint(
+                exp_dir / f"epoch_{epoch}.pth.tar",
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch,
+                scaler=scaler,
+                linear_probe_state_dict=linear_probe.state_dict(),
+                linear_val_acc=val_acc,
+            )
+
+    logger.info("Training completed!")
+    if wandb_run:
+        wandb.finish()
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(run)

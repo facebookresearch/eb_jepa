@@ -1,8 +1,21 @@
 [project]
-name = "eb-jepa"
+name = "eb_jepa"
 version = "0.1.1"
 description = "Energy-Based JEPA"
-authors = [{name = "Yann LeCun", email = "ylecun@meta.com"}, {name = "Amir Bar", email = "amirbar@meta.com"}, {name= "Koustuv Sinha", email="koustuvs@meta.com"}]
+authors = [
+    {name = "Basile Terver", email = "basileterv@meta.com"},
+    {name = "Randall Balestriero", email = "rbalestriero@meta.com"},
+    {name = "Megi Dervishi", email = "megidervishi@meta.com"},
+    {name = "David Fan", email = "davidfan@meta.com"},
+    {name = "Quentin Garrido", email = "garridoq@meta.com"},
+    {name = "Tushar Nagarajan", email = "tusharn@meta.com"},
+    {name = "Koustuv Sinha", email = "koustuvs@meta.com"},
+    {name = "Wancong Zhang", email = "wz1232@nyu.edu"},
+    {name = "Mike Rabbat", email = "mikerabbat@meta.com"},
+    # Equal contribution as senior authors
+    {name = "Yann LeCun", email = "yann@meta.com"},
+    {name = "Amir Bar", email = "amirbar@meta.com"},
+]
 dependencies = [
     "einops>=0.8.1",
     "fire>=0.7.0",
@@ -15,7 +28,7 @@ dependencies = [
     "torch==2.6.0",
     "torchcodec>=0.4.0",
     "torchvision",
-    "wandb>=0.21.1",
+    "wandb[media]>=0.21.1",
     "gymnasium>=1.1.1",
     "imageio",
     "seaborn",
@@ -44,4 +57,5 @@ dev = [
     "black>=25.1.0",
     "isort>=6.0.1",
     "pytest>=8.4.1",
+    "autoflake",
 ]

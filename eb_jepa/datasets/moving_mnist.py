@@ -1,14 +1,21 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-FILENAME = "datasets/mnist_test_seq.npy"
+# Use environment variable or fall back to path relative to __file__
+# This allows the original data location to be preserved when running from copied code folder
+_DEFAULT_DATASETS_DIR = Path(__file__).parent.parent.parent.absolute() / "datasets"
+_DATASETS_DIR = Path(os.environ.get("EBJEPA_DSETS", str(_DEFAULT_DATASETS_DIR)))
+FILENAME = str(_DATASETS_DIR / "mnist_test_seq.npy")
 URL = "https://www.cs.toronto.edu/~nitish/unsupervised_video/mnist_test_seq.npy"
 
 
 def load_or_download(filename: str, url: str):
+    # Ensure datasets directory exists
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
     if not os.path.exists(filename):
         print(f"File '{filename}' not found. Downloading from {url}...")
         try:
@@ -42,12 +49,10 @@ class MovingMNIST(Dataset):
     def __init__(self, split=None):
         """
         Args:
-            transform (callable, optional): Optional transform to be applied on a sample.
             split (str): train or val
 
         Returns:
-            video (torch.Tensor) (C, T, H, W): greyscale video frames
-            context (torch.Tensor) (C, T, H, W): past greyscale video frames as context
+            video: [C, T, H, W] - greyscale video frames
         """
         load_or_download(FILENAME, URL)
         self.data_path = FILENAME
@@ -82,9 +87,8 @@ class MovingMNISTDet(MovingMNIST):
             map_size (int): size of map to predict positions over
 
         Returns:
-            video (torch.Tensor) (C, T, H, W): greyscale video frames
-            context (torch.Tensor) (C, T, H, W): past greyscale video frames as context
-            digit_location (torch.Tensor) (T, map_size, map_size): Coarse binary heatmap for digit locations
+            video: [C, T, H, W] - greyscale video frames
+            digit_location: [T, map_size, map_size] - Coarse binary heatmap for digit locations
         """
         super().__init__(split)
         self.transform = transform
@@ -109,13 +113,11 @@ class MovingMNISTDet(MovingMNIST):
 
 
 if __name__ == "__main__":
-    dset = MovingMNIST()
+    dset = MovingMNIST(split="val")
     instance = dset[10]
     print(f"{instance['video'].shape = }")
-    print(f"{instance['context'].shape = }")
 
-    dset = MovingMNISTDet()
+    dset = MovingMNISTDet(split="val")
     instance = dset[10]
     print(f"{instance['video'].shape = }")
-    print(f"{instance['context'].shape = }")
     print(f"{instance['digit_location'].shape = }")

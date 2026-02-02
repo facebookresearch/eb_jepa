@@ -108,7 +108,8 @@ def test_gc_agent(mock_cem_planner):
     # Create a mock model with parameters
     mock_model = Mock()
     mock_model.encode = Mock(return_value=torch.zeros(1, 8, 1, 8, 8))
-    mock_model.unrolln = Mock(return_value=torch.zeros(10, 8, 6, 8, 8))
+    # unroll returns a tuple (predicted_states, loss) - loss is None when compute_loss=False
+    mock_model.unroll = Mock(return_value=(torch.zeros(10, 8, 6, 8, 8), None))
     # Add a parameter method that returns an iterator with a device
     param = torch.nn.Parameter(torch.zeros(1))
     mock_model.parameters = Mock(return_value=iter([param]))
@@ -193,7 +194,7 @@ def test_gc_agent(mock_cem_planner):
     states = agent.unroll(obs_init, actions)
 
     # Verify unroll behavior
-    assert mock_model.unrolln.called, "Model's unroll should be called"
+    assert mock_model.unroll.called, "Model's unroll should be called"
     assert isinstance(states, torch.Tensor), "Should return a tensor"
 
 
@@ -241,8 +242,19 @@ def test_main_eval(mock_gc_agent):
     mock_agent_instance = Mock()
     mock_agent_instance.act = Mock(return_value=torch.tensor([[0.1, 0.2]]))
     mock_agent_instance.device = torch.device("cpu")
-    mock_agent_instance.analyze_distances = Mock(return_value=([], []))
     mock_agent_instance.decode_each_iteration = False
+    mock_agent_instance.num_act_stepped = 1
+    # Set up proper tensor values for agent attributes used by analyze_distances
+    mock_agent_instance.goal_position = torch.tensor([10.0, 10.0])
+    mock_agent_instance.goal_state = torch.zeros(2, 65, 65)
+    mock_agent_instance.normalizer = mock_normalizer = Mock()
+    mock_normalizer.normalize_state = Mock(side_effect=lambda x: x)
+    mock_agent_instance.model = Mock()
+    mock_agent_instance.model.encode = Mock(return_value=torch.zeros(1, 8, 1, 4, 4))
+    mock_agent_instance.objective = Mock(return_value=torch.zeros(1))
+    mock_agent_instance._prev_losses = None
+    mock_agent_instance._prev_elite_losses_mean = None
+    mock_agent_instance._prev_elite_losses_std = None
     mock_gc_agent.return_value = mock_agent_instance
 
     # Create plan config
@@ -264,12 +276,12 @@ def test_main_eval(mock_gc_agent):
     }
 
     # Run evaluation with fewer episodes for testing
-    os.makedirs("./logs/", exist_ok=True)
+    os.makedirs("./tests/logs/", exist_ok=True)
     results = main_eval(
         plan_cfg=plan_cfg,
         model=mock_model,
         env_creator=mock_env_creator,
-        eval_folder=Path("./logs/"),
+        eval_folder=Path("./tests/logs/"),
         num_episodes=num_episodes,
     )
 
@@ -301,10 +313,19 @@ def test_planning_integration():
             B, C, T, H, W = x.shape
             return torch.zeros(B, 8, T, 4, 4, device=x.device)
 
-        def unrolln(self, obs, actions, steps, ctxt_window_time=1):
+        def unroll(
+            self,
+            obs,
+            actions,
+            nsteps,
+            unroll_mode="autoregressive",
+            ctxt_window_time=1,
+            compute_loss=False,
+            return_all_steps=False,
+        ):
             # Simpler unroll function that doesn't depend on complex tensor shapes
             B = obs.shape[0]
-            return torch.ones(B, 8, steps, 4, 4, device=obs.device)
+            return torch.ones(B, 8, nsteps, 4, 4, device=obs.device), None
 
     # Test full planning episode
     # Create model and move to appropriate device

@@ -1,143 +1,89 @@
 # Self-Supervised Representation Learning from Video Sequences
 
-This example demonstrates Joint Embedding Predictive Architecture (JEPA) for self-supervised representation learning on video sequences. The model learns to predict future video representations from past observations without requiring labeled data.
-
-## Overview
-
-JEPA learns representations by training an encoder to map observations to a latent space and a predictor to predict future representations. The key insight is that good representations should enable better prediction of future states.
-
+This example demonstrates Joint Embedding Predictive Architecture (JEPA) for self-supervised representation learning on moving MNIST video sequences. The videos show two hand-written digits (0-9) moving around the video frame and bouncing off the edges using standard collision physics. The JEPA is trained to predict future video representations from past observations without requiring labeled data, effectively predicting the future trajectory of the digits, in representation space.
 
 ![Video JEPA Architecture](assets/arch_figure.png)
 
+### Overview
+The video JEPA architecture consists of:
+- **Encoder (`ResNet5`)**: A lightweight ResNet that maps video frames to latent representations. Uses residual blocks for stable gradient flow.
+- **Predictor (`ResUNet`)**: A UNet-based architecture that predicts future representations given concatenated current and previous representations. Skip connections preserve spatial information.
+- **Projector (`MLP`)**: A simple network that projects representations before applying a cost function.
 
-## Architecture
+### Training
+Training works as follows. First, video frames are encoded into representation space. Then the past `K` frame encodings are taken as context and provided to the predictor. The predictor predicts the `K+1` th frame representation. Both the encoder and predictor are trained together with the following objectives:
 
-### Components
+- **Prediction Loss**: Minimizes prediction error between predicted and actual future representations. The prediction loss supports multi-step rollout prediction to predict `T` steps into the future autoregressively, ensuring temporal consistency of predictions.
+- **VC Loss (Variance-Covariance)**: Regularizes representations to prevent collapse. The VC loss is parametrized by two weight factors `std_coeff` and `cov_coeff` for the variance and covariance terms respectively.
 
+### Evaluation
+We evaluate the trained JEPA models using a simple digit detection task. Specifically, we train a frame-level decoder to predict the discretized location of a digit, given its encoder representations (BCE loss). We then use the JEPA to generate the future video representations autoregressively, and predict and evaluate the digit locations using the decoder. We also train a pixel-level decoder for the JEPA representations for visualization purposes (MSE loss). Note that both decoders are trained independent to the JEPA training (i.e., gradients are detached).
 
-1. **Encoder (`ResNet5`)**: A lightweight ResNet that maps video frames to latent representations
-   - Input: Video frames `(B, C, T, H, W)`
-   - Output: Latent representations `(B, dstc, T, H, W)`
-   - Uses residual blocks for stable gradient flow
+We report average precision for digit locations at `T` timesteps into the future (`AP_T`) as well as the average over all prediction horizons (`mAP`).
 
-2. **Predictor (`ResUNet`)**: A UNet-based architecture that predicts future representations
-   - Input: Concatenated current and previous representations
-   - Output: Predicted future representations
-   - Skip connections preserve spatial information
+## Setup
 
-3. **Projector**: MLP that projects representations before applying a cost function
-   - Enables comparing projecctions instead of encoder representations
-
-### Training Objectives
-
-- **Prediction Loss**: - Minimizes prediction error between predicted and actual future representations
-- **VC Loss (Variance-Covariance)**: Regularizes representations to prevent collapse
-
-## Self-Supervised Learning Approach
-
-The model learns representations through:
-
-1. **Temporal Prediction**: Given current and previous representations, predict the next representation
-2. **Multi-step Rollout**: Extend predictions to multiple future time steps
-3. **Collapse Prevention**: Ensure representations do not collapse using Variance-Covariance Loss.
-
-This approach forces the encoder to learn features that capture:
-- Object motion and dynamics
-- Spatial relationships
-- Temporal consistency
-
-### How the Predictor Achieves Coherent Temporal Dynamics
-
-The predictor maintains coherent temporal dynamics through several key mechanisms:
-
-1. **Context-Aware Input**: The predictor receives concatenated representations from the current and previous time steps `[z_t, z_{t-1}]`, providing temporal context about recent motion and state changes.
-
-2. **ResUNet Architecture**: The UNet structure with skip connections preserves spatial information while the residual blocks maintain gradient flow, allowing the model to learn both local and global temporal patterns.
-
-3. **Autoregressive Rollout**: During inference, the predictor operates in an autoregressive manner:
-   - Predicts the next representation: `z_{t+1} = f(z_t, z_{t-1})`
-   - Uses this prediction as input for the next step: `z_{t+2} = f(z_{t+1}, z_t)`
-   - This creates a chain of predictions that maintain temporal consistency
-
-4. **Representation Regularization**: The VC loss ensures representations don't collapse to trivial values, maintaining the rich temporal information needed for coherent predictions.
-
-5. **Motion Understanding**: By training on sequences with consistent physics (bouncing digits), the model learns to encode motion vectors and trajectory information that naturally extend into the future.
-
-This combination allows the predictor to generate temporally coherent sequences that respect the underlying dynamics of the moving objects, even when extending predictions multiple steps into the future.
-
-## Usage
-
+The example uses Moving MNIST, a synthetic dataset with multiple digits moving across the screen, motion follows simple physics (bouncing off boundaries). **Note**: The Moving MNIST dataset (~800MB) is automatically downloaded on first run from the University of Toronto servers. This requires internet access. If you're running on a cluster without internet access, you can manually download the dataset:
 ```bash
-python main.py \
-    --batch_size 64 \
-    --dobs 1 \
-    --henc 32 \
-    --hpre 32 \
-    --dstc 16 \
-    --steps 1 \
-    --cov_coeff 10.0 \
-    --std_coeff 200.0 \
-    --epochs 100 \
-    --lr 5e-4
-```
-
-### Key Parameters
-
-- `dobs`: Input observation dimensions
-- `henc`: Hidden dimensions in encoder
-- `hpre`: Hidden dimensions in predictor
-- `dstc`: Output representation dimensions
-- `steps`: Number of prediction steps during training
-- `cov_coeff`: Variance-covariance loss coefficient
-- `std_coeff`: Standard deviation loss coefficient
-
-## Dataset
-
-The example uses Moving MNIST, a synthetic dataset where:
-- Multiple digits move across the screen
-- Motion follows simple physics (bouncing off boundaries)
-- Each video has a fixed number of frames
-- Ground truth digit locations are available for evaluation
-
-**Note**: The Moving MNIST dataset (~800MB) is automatically downloaded on first run from the University of Toronto servers. This requires internet access. If you're running on a cluster without internet access, you can manually download the dataset:
-
-```bash
-# Download from a machine with internet access
 wget https://www.cs.toronto.edu/~nitish/unsupervised_video/mnist_test_seq.npy -P datasets/
-
-# The file should be placed at datasets/mnist_test_seq.npy before running the example
 ```
 
-## Evaluation
 
-The model is evaluated on:
-- **Reconstruction Loss**: How well the decoder can reconstruct input from representations
-- **Detection Loss**: Performance on digit location prediction task
-- **Average Precision (AP)**: Quality of multi-step predictions
+## Training
+
+Train a model with the default configuration (`cov_coeff=100, std_coeff=10, nsteps=4`):
+```bash
+python -m examples.video_jepa.main \
+   --fname examples/video_jepa/cfgs/default.yaml
+```
+
+You can override any config parameter using dot notation:
+```bash
+python -m examples.video_jepa.main \
+   --fname examples/video_jepa/cfgs/default.yaml \
+   model.steps=2 \
+   data.batch_size=128
+```
+
+This will train all components and decoders and visualize results in wandb.
+
+**Key parameters**
+- `model.dobs`: Input observation dimensions
+- `model.henc`: Hidden dimensions in encoder
+- `model.hpre`: Hidden dimensions in predictor
+- `model.dstc`: Output representation dimensions
+- `model.steps`: Number of prediction steps during training
+- `loss.cov_coeff`: Variance-covariance loss coefficient
+- `loss.std_coeff`: Standard deviation loss coefficient
 
 ## Results
 
-### Visualization
+![Video JEPA Visualization](assets/viz.gif)
 
-*Visualization showing input frames, 1-step predictions visaulization, and full rollout, obtained via auto-regressive prediction, on Moving MNIST data.*
+Visualization from wandb showing input frames, full rollout obtained via auto-regressive prediction and predicted digit detections (blue heatmap overlays) on Moving MNIST data. The JEPA model learns representations that can predict dynamics well.
 
-![Video JEPA Visualization](assets/viz.png)
+### Detection accuracy
+We plot the JEPA training losses and detection performance (`mAP`) to show how they evolve to learn stronger representations over time.
+![Video JEPA Losses](assets/losses.png)
 
-### Multi-step Prediction Analysis
+### Multi-step Prediction
 
-#### K-Step Predictions
+The `model.steps` parameter controls how many future prediction steps are used to calculate the loss, which has a direct impact on how far into the future the JEPA model can reliably predict.
 
-*Analysis showing that recursively predicting more steps achieve significantly better Average Precision (AP) compared to 1-step predictions. This decreases exposure bias, the discrapancy between train and test, and demonstrates the model's improved temporal understanding with longer prediction horizons.*
+![Video JEPA AP vs. t](assets/AP_vs_t.png)
 
-![Multi-step Prediction Analysis](assets/multistep_pred.png)
+As expected, predicting the very next timestep is easy (high mAP) while performance further into the future is naturally lower. Recursively predicting more steps achieve significantly better mAP compared to 1-step or 2-step predictions, however this saturates by 8 steps, which approaches the duration of the video (training is done with 10 frame horizon).
 
+### JEPA loss ablation
 
-## Key Insights
+We vary the `cov_coeff` and `std_coeff` to see the effect on downstream performance (`mAP`). We find the best configuration to be `cov_coeff=100`, `std_coeff=10`.
 
-1. **Representation Quality**: Good representations enable accurate multi-step prediction
-2. **Temporal Consistency**: The model learns to maintain consistency across time steps
-3. **Motion Understanding**: Representations capture object dynamics and trajectories
-4. **Generalization**: Learned features transfer to downstream tasks like detection
+|   cov ↓ std → |        1 |       10 |      100 |
+|------------|---------:|---------:|---------:|
+|           1 | 0.259 | 0.450 | 0.492 |
+|          10 | 0.448 | 0.424 | 0.487 |
+|         100 | 0.516 | **0.607** | 0.525 |
+
 
 ## References
 

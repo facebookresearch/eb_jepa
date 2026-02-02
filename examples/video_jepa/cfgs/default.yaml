@@ -1,0 +1,54 @@
+# Video JEPA Training Configuration
+# Train a self-supervised video prediction model on Moving MNIST
+
+meta:
+  seed: 2025
+  device: auto  # auto, cuda, or cpu
+
+data:
+  dataset: moving_mnist
+  batch_size: 64
+  num_workers: 4
+
+model:
+  # Encoder (ResNet5)
+  dobs: 1           # Input channels (grayscale)
+  henc: 32          # Hidden dimension in encoder
+  dstc: 16          # Output representation dimension
+
+  # Predictor (ResUNet)
+  hpre: 32          # Hidden dimension in predictor
+
+  # Training
+  steps: 4          # Number of prediction steps during training
+
+loss:
+  # Variance-Covariance regularization
+  cov_coeff: 100.0  # Covariance loss weight
+  std_coeff: 10.0   # Standard deviation loss weight
+
+optim:
+  epochs: 50
+  lr: 1.0e-3
+
+logging:
+  log_wandb: true
+  wandb_group:        # Set to group runs (e.g., for seed averaging)
+  log_every: 1        # Log every N epochs
+  save_every: 10      # Save checkpoint every N epochs
+  tqdm_silent: false  # Disable tqdm progress bars
+
+training:
+  use_amp: true       # Use automatic mixed precision
+  dtype: float16      # float16 or bfloat16
+
+# --- Parameters used when running with --full-sweep
+# By default, only the parameters specified above are used
+sweep:
+  # Sweep grid for video JEPA hyperparameter search
+  param_grid:
+    data.batch_size: [32, 64]
+    optim.lr: [0.001, 0.0001, 0.0005]
+    loss.std_coeff: [1, 10, 100, 200]
+    loss.cov_coeff: [1, 10, 100, 200]
+    meta.seed: [1, 1000, 10000]

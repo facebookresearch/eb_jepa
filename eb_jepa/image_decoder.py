@@ -6,7 +6,7 @@ from eb_jepa.nn_utils import TemporalBatchMixin, init_module_weights
 class ImageDecoder(TemporalBatchMixin, nn.Module):
     """
     Simple 2D convolutional decoder for reconstructing images from representations.
-    Supports both 4D (B,C,H,W) and 5D (B,C,T,H,W) inputs via TemporalBatchMixin.
+    Supports both 4D [B, C, H, W] and 5D [B, C, T, H, W] inputs via TemporalBatchMixin.
     """
 
     def __init__(

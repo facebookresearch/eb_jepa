@@ -151,6 +151,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+uv.lock
 
 # Spyder project settings
 .spyderproject
@@ -220,10 +221,9 @@ wandb
 .streamlit/secrets.toml
 
 # example text multistep ignores
-apps/example_text_multistep/data/fineweb10B/
-apps/example_text_multistep/logs/
-logs/
+tests/logs/
 checkpoints/
 *.pth
 *.npy
 eb_jepa_ICLR/
+CLAUDE.md
