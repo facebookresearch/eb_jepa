@@ -51,7 +51,7 @@ $$\mathcal{L}_{\mathrm{var}} = \frac{1}{HD} \sum^H_{t=0} \sum^D_{j=0} \mathrm{ma
 
 $$C(Z_t) = \frac{1}{N-1}(Z_t-\bar{Z_t})^\top(Z_t-\bar{Z_t}),  \ \bar{Z} =  \frac{1}{N} \sum^N_{b=1} Z_{t,b}$$
 
-$$\mathcal{L}_{\mathrm{cov}} = \frac{1}{H} \sum^{H}_{t=0} \frac{1}{D} \sum_{i \neq j} [C(Z_t)]^2_{i,j}$$
+$$\mathcal{L}_{\mathrm{cov}} = \frac{1}{H} \sum^{H}_{t=0} \frac{1}{D(D-1)} \sum_{i \neq j} [C(Z_t)]^2_{i,j}$$
 
 $$\mathcal{L}_{\mathrm{IDM}} = \sum^H_{t=0} \frac{1}{N} \sum^N_{b=0} \| a_{t,b} - \mathrm{MLP}(Z_{(t,b)}, Z_{(t+1,b)}) \|^2_2$$
 
@@ -72,25 +72,24 @@ We study two setups:
 
 ### Usage
 ```bash
-# Train a model
+# Train a model locally
 python -m examples.ac_video_jepa.main \
-  --fname examples/ac_video_jepa/cfgs/<train_cfg>.yaml
+  --fname examples/ac_video_jepa/cfgs/train.yaml
 
-# Launch sbatch single training
-python -m examples.ac_video_jepa.launch_sbatch \
-  --fname examples/ac_video_jepa/cfgs/<train_cfg>.yaml \
+# Launch 3 seeds with automatic wandb averaging (recommended)
+python -m examples.launch_sbatch --example ac_video_jepa
 
-# Run planning evaluation of specific checkpoint
+# Launch 3 seeds with custom sweep name
+python -m examples.launch_sbatch --example ac_video_jepa --sweep my_experiment
+```
+
+See the main [README](../../README.md) for wandb seed averaging and sweep UI instructions.
+
+```bash
+# Run planning evaluation of a trained model
 python -m examples.ac_video_jepa.main \
-  --fname examples/ac_video_jepa/cfgs/<train_cfg>.yaml \
   --meta.model_folder /path/to/trained/model \
-  --meta.plan_eval_only_mode True
-
-# Run train hyperparameter sweep
-python -m examples.ac_video_jepa.launch_sbatch \
-  --sweep /sweep/common/folder \
-  --fname examples/ac_video_jepa/cfgs/<train_cfg>.yaml \
-  --use_wandb_sweep
+  --meta.eval_only_mode True
 ```
 
 ## Evaluation
@@ -151,7 +150,7 @@ The unrolling of 90 actions by our best model is illustrated in the below figure
 | *Random wall train and eval* |
 
 ### Planning
-In all the below tables, we first obtain success rates as an average over $N=20$ planning episodes. For each model, we launch 3 training seeds, oveer which we average success rate. To account for variability across a single run, we also average the success rate of the last 3 training epochs. We display the **std over 3 seeds and the 3 last epoch checkpoints** for all below sections.
+In all the below tables, we first obtain success rates as an average over $N=20$ planning episodes. For each model, we launch 3 training seeds, over which we average success rate. To account for variability across a single run, we also average the success rate of the last 3 training epochs. We display the **std over 3 seeds and the 3 last epoch checkpoints** for all below sections.
 
 Our best model gets 97% Success in the Random Wall setup.
 
@@ -159,8 +158,8 @@ Our best model gets 97% Success in the Random Wall setup.
 |-------------------|---------|------------------|
 | Impala - RNN| MPPI   | $97 \pm 2$ |
 
-#### Visualisation
-The below figure shows a successful planning episode with the MPPI planner, a model trained on the fix wall and evaluated on the same wall position.
+#### Visualization
+The below figure shows a successful planning episode with the MPPI planner, a model trained on the fixed wall and evaluated on the same wall position.
 
 | Planning Episode | Task Definition |
 |------------------|-----------------|
@@ -208,13 +207,15 @@ Key insights:
 
 ## Experiment tracking
 We encourage to use the extensive integration of wandb logging in this `ac_video_jepa` example.
-To reproduce the below plot, launch a training sweep with the below values for the regularization loss coefficients, hardcoding them in `examples/ac_video_jepa/launch_sbatch.py` and launching
+To reproduce the below plot, launch a full hyperparameter sweep with the `--full-sweep` flag:
 ```
 python -m examples.ac_video_jepa.launch_sbatch \
-  --sweep /sweep/common/folder \
+  --sweep <experiment_name> \
   --fname examples/ac_video_jepa/cfgs/train.yaml \
-  --use_wandb_sweep
+  --full-sweep \
+  --use-wandb-sweep
 ```
+This sweeps over the following regularization loss coefficients and seeds:
 
 | $\beta$ | $\alpha$ | $\delta$ | $\omega$ |
 |---------|---------|---------|--------|

@@ -1,6 +1,6 @@
 ## Self-Supervised Representation Learning from Unlabeled Images
 
-This example demonstrates how to train a Joint Embedding Predictive Architecture (JEPA) on unlabeled images. The model learns representations from individual frames of the CIFAR 10 dataset and is evaluated using linear probing for image classification.
+This example demonstrates how to train a Joint Embedding Predictive Architecture (JEPA) on unlabeled images. More precisely, methods studied here are JEAs as there is no predictor. The model learns representations from individual frames of the CIFAR 10 dataset and is evaluated using linear probing for image classification.
 
 ![Image JEPA Architecture](assets/arch_figure.png)
 
@@ -15,7 +15,7 @@ This example demonstrates how to train a Joint Embedding Predictive Architecture
 
 The Image JEPA consists of:
 - **Encoder**: ResNet18/Transformer backbone that processes individual images
-- **Regularizer**: Variance-Covariance (VC) or LeJEPA loss to prevent representation collapse
+- **Regularizer**: Variance-Covariance (VC) or SIGReg loss to prevent representation collapse
 - **Projector**: Learned MLP Projector (loss is computed on the projected subspace)
 
 ## Usage
@@ -25,102 +25,88 @@ The Image JEPA consists of:
 #### 1. ResNet + VICReg Loss
 
 ```bash
-python main.py \
-    --model_type resnet \
-    --loss_type vicreg \
-    --var_loss_weight 1.0 \
-    --cov_loss_weight 80.0 \
-    --batch_size 256 \
-    --epochs 300
+python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/default.yaml
 ```
 
-#### 2. ResNet + LE-JEPA (SIGReg) Loss
+#### 2. ResNet + SIGReg (SIGReg) Loss
 
 ```bash
-python main.py \
-    --model_type resnet \
-    --loss_type bcs \
-    --lmbd 10.0 \
-    --batch_size 256 \
-    --epochs 300
+python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/sigreg.yaml
 ```
 
 #### 3. Vision Transformer + VICReg Loss
 
 ```bash
-python main.py \
-    --model_type vit_s \
-    --patch_size 2 \
-    --loss_type vicreg \
-    --sim_loss_weight 25.0 \
-    --var_loss_weight 25.0 \
-    --cov_loss_weight 1.0 \
-    --batch_size 256 \
-    --epochs 300
+python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/transformers.yaml
 ```
 
-For ViT-Base, use `--model_type vit_b` instead of `vit_s`.
+For ViT-Base, add `model.type=vit_b` override:
+
+```bash
+python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/transformers.yaml model.type=vit_b
+```
+
+#### Custom Overrides
+
+You can override any config parameter using dot notation:
+
+```bash
+python -m examples.image_jepa.main --fname examples/image_jepa/cfgs/default.yaml optim.epochs=50 data.batch_size=128
+```
 
 ## Results
 
-### Comparison: LE-JEPA vs VICReg
+### Comparison: SIGReg and VICReg
 
-![Hyperparameter Sensitivity Comparison](assets/hyperparam_sensitivity_comparison.png)
+We first compare the sensitivity to regularizer loss coefficients of SIGReg and VICReg. We sweep over these, training on CIFAR-10 with ResNet-18 backbone, trained for 300 epochs.
 
-| Metric | LE-JEPA (SigReg) | VICReg |
+![Hyperparameter Sensitivity Comparison](assets/aggregated_perf_image.png)
+
+| Metric | SIGReg (BCS) | VICReg |
 |--------|------------------|--------|
-| Best Accuracy | 90.67% | 90.95% |
-| Projector Benefit | +2.5% | Variable |
-| Stability | High | Lower (sensitive to hyperparams) |
-| Best Projector Dims | 2048×128 | 2048x2048 |
+| Best Accuracy | 91.02% | 90.12% |
+| Average (non-collapsed) Accuracy | 89.22% | 84.90% |
+| Projector Benefit | +3.3 points | +2.9 points |
+| Hyperparameters | 1 | 2 |
+| Best Projector Dims | 2048×128 | 2048x1024 |
 
-**Conclusion:** Both methods achieve similar peak performance (~90%). LE-JEPA is more stable across hyperparameter choices, while VICReg can match performance but requires more careful tuning.
+**Finding:** Both methods achieve similar peak performance (~90%). While both methods can fail in certain cases, logical hyperparameter choices give performance in a similar ballpark. Performing the most naïve search over hyperparameters, SIGReg can be easier to tune due to the use of a single loss hyperparameter.
 
-Results on CIFAR-10 with ResNet-18 backbone, trained for 300 epochs.
+### Impact of regularizations
 
-### LE-JEPA (SigREG Loss) Best Configuration
+With a batch size of 256 and 1024x1024 projector we investigate the impact of regularizations for VICReg and SIGReg:
 
-| Parameter | Value |
-|-----------|-------|
-| **Best Accuracy** | **90.67%** |
-| batch_size | 256 |
-| lmbd (λ) | 10.0 |
-| use_projector | Yes |
-| proj_hidden_dim | 2048 |
-| proj_output_dim | 128 |
+|      | SIGReg    |          | VICReg     |          |
+|------|------------|----------|------------|----------|
+| Rank | Hyperparameters | Accuracy | Hyperparameters | Accuracy |
+| 1 | $\lambda$= 10 |90.88 %   | std = 1 cov = 100 | 90.12 % |
+| 2 | $\lambda$= 1 | 86.94%    | std = 1 cov = 10 | 89.93 % |
+| 3 | $\lambda$= 100 | 80.86%  | std = 10 cov = 10 |  89.2 % |
+| -1 | $\lambda$= 0.1 | 27.20% | std = 100 cov = 100 | 10.00% |
 
-### Impact of Lambda (λ)
+**Finding:** For both methods, performance can vary drastically between different hyperparameter choices. The main failure mode is when losses such as the invariance term (here set with a weight of 1) become insignificant which leads to a fundamentally flawed training. Logical choices offer much more stable performance.
 
-| λ | Best Acc |
-|---|----------|
-| 1.0 | 87.23% |
-| **10.0** | **90.67%** |
-| 100.0 | 82.28% |
 
-**Finding:** λ=10.0 is optimal. Too low (λ=1) underperforms by ~3.4%, too high (λ=100) underperforms by ~8.4%.
+### Impact of the projector
 
-### Impact of Projector
+Top 5 dimension combinations. For SIGReg we use λ=10.0, batch_size=256 and for VICReg std=1.0,cov=100, batch_size=256:
 
-| Configuration | Mean | Max |
-|---------------|------|-----|
-| **With Projector** | **90.29%** | **90.67%** |
-| No Projector | 87.69% | 88.15% |
+|      | SIGReg    |          | VICReg     |          |
+|------|------------|----------|------------|----------|
+| Rank | Dimensions | Accuracy | Dimensions | Accuracy |
+| 1 | 2048 × 128 | 91.02% | 2048 × 1024 | 90.12% |
+| 2 | 4096 × 1024 | 91.00% | 4096 x 512 | 90.10% |
+| 3 | 2048 × 64 | 90.99% | 1024 x 1024 | 90.05% |
+| 4 | 512 × 256 | 90.99% | 2048 x 512 | 90.03% |
+| 5 | 4096 × 64 | 90.96% | 4096 x 1024 | 90.02% |
+| N/A | None | 87.75% | None | 87.27% |
 
-**Finding:** Using a projector provides **+2.5%** improvement.
+**Finding:** Large hidden dimensions are beneficial for both methods, although all of the top-performing scenarios all offer similar performance.
+VICReg tends to work better with higher dimensional output dimensions, whereas SIGReg works better with small output dimensions.
+This difference does not lead to meaningful practical differences in terms of training time or memory.
 
-### Projector Dimensions (proj_hidden_dim × proj_output_dim)
+Both methods have a similar drop of performance of around 2.5-3 points when not using a projector, highlighting its importance in the method's design.
 
-Top 5 dimension combinations (with λ=10.0, batch_size=256):
-
-| Rank | Dimensions | Accuracy |
-|------|------------|----------|
-| 1 | 2048 × 128 | 90.67% |
-| 2 | 1024 × 256 | 90.65% |
-| 3 | 512 × 1024 | 90.61% |
-| 4 | 512 × 256 | 90.60% |
-| 5 | 4096 × 4096 | 90.56% |
-
-**Finding:** Larger hidden dimensions (1024-2048) with smaller output dimensions (128-256) work best. The bottleneck effect (compressing representations) appears beneficial.
 
 ---
 
@@ -131,4 +117,4 @@ Top 5 dimension combinations (with λ=10.0, batch_size=256):
 - [Transformer Architecture](https://arxiv.org/abs/1706.03762)
 - [Vision Transformer Architecture](https://arxiv.org/abs/2010.11929)
 - [VICReg](https://arxiv.org/abs/2105.04906)
-- [LeJEPA](https://arxiv.org/abs/2511.08544)
+- [LeJEPA/SIGReg](https://arxiv.org/abs/2511.08544)

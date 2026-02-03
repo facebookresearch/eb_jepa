@@ -17,6 +17,6 @@ jobs:
     - name: Set up Python
       run: uv python install
     - name: Install the project
-      run: uv sync --locked --all-extras --dev
+      run: uv sync --all-extras --dev
     - name: Run tests
-      run: uv run pytest tests 
+      run: uv run pytest tests

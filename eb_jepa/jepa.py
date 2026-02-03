@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 
@@ -7,17 +6,11 @@ from eb_jepa.logging import get_logger
 logging = get_logger(__name__)
 
 
-######################################################
-# a basic JEPA class. No learning abilities
-# this is for planning and inference only.
-# use the full JEPA class for SSL training.
 class JEPAbase(nn.Module):
+    """Base JEPA class for planning and inference only. Use JEPA subclass for training."""
+
     def __init__(self, encoder, aencoder, predictor):
-        """
-        Action-Conditioned Joint Embedding Predictive Architecture world model.
-        This class has no training ability.
-        Use the JEPA subclass for training.
-        """
+        """Initialize JEPAbase with encoder, action encoder, and predictor."""
         super().__init__()
         # Observation Encoder
         self.encoder = encoder
@@ -33,164 +26,198 @@ class JEPAbase(nn.Module):
     def load(self, file):
         self.load_state_dict(torch.load(file), weights_only=False)
 
-    # just runs the encoder on a sequence of observations
-    # and returns the encoder output sequence
     @torch.no_grad()
     def encode(self, observations):
+        """Encode a sequence of observations and return the encoder output."""
         return self.encoder(observations)
 
-    # inference producing single-step predictions over all
-    # elements in a sequence in  parallel.
-    @torch.no_grad()
-    def infer(self, observations, actions):
-        return self.infern(observations, actions, nsteps=1)[0]
 
-    @torch.no_grad()
-    def infern(self, observations, actions, nsteps=1):
-        # check number of steps.
-        state = self.encoder(observations)
-        context_length = self.predictor.context_length
-
-        if actions is not None:
-            actions = self.action_encoder(actions)
-
-        predi = state
-        preds = []
-        for _ in range(nsteps):
-            predi = self.predictor(predi, actions)[:, :, :-1]
-            preds.append(predi)
-            predi = torch.cat((state[:, :, :context_length], predi), dim=2)
-
-        # compute total loss here
-        return preds
-
-    # TODO: refactor predictor
-    # perform a multi-step prediction, auto-regressively in state space.
-    # Predictions are performed sequentially starting from a given context of
-    # observations.shape[2] frames, on actions.shape[2] action time steps.
-    # The last prediction timestep predi[:, :, -1:] is concatenated to the
-    # input state for the next prediction step.
-    # Optionally, a context window can be used to limit the number of past actions and frames
-    # the predictor can attend to.
-    # Returns predin: a concatention of groundtruth context embeddings and predictions.
-    @torch.no_grad()
-    def unrolln(self, observations, actions, nsteps, ctxt_window_time=1):
-        """
-        Input shape: observations: (Batch, Feature, Time, Height, Width) OR (Batch, Time, Dim)
-        actions: (Batch, Feature, Time, Height, Width)
-        Output shape: predin: (Batch, Feature, Time, Height, Width) OR (Batch, Time, Dim)
-        """
-        if nsteps > actions.size(2):
-            raise NameError(
-                "number of prediction steps larger than length of action sequence"
-            )
-        # Input Encoding
-        state = self.encoder(observations)
-        # Action Encoding
-        actions = self.action_encoder(actions)
-        # prediction loop through steps.
-        # we just run the predictor as if it were a recurrent net.
-        if self.single_unroll:
-            curr_state = state[:, :, :1]
-            predin = curr_state
-            for i in range(nsteps):
-                curr_action = actions[:, :, i : i + 1]
-                curr_state = self.predictor(curr_state, curr_action)
-                predin = torch.cat([predin, curr_state], dim=2)
-        else:
-            predin = state
-            for i in range(nsteps):
-                predi = self.predictor(
-                    predin[:, :, -ctxt_window_time:],
-                    actions[:, :, max(0, i + 1 - ctxt_window_time) : i + 1],
-                )
-                predi = predi[:, :, -1:]  # take the last time step
-                predin = torch.cat([predin, predi], dim=2)
-        return predin
-
-
-################################################################
-# A trainable JEPA class
-# with a prediction loss and an anti-collapse regularizer loss
 class JEPA(JEPAbase):
+    """Trainable JEPA with prediction loss and anti-collapse regularizer."""
+
     def __init__(self, encoder, aencoder, predictor, regularizer, predcost):
-        """
-        Action-Conditioned Joint Embedding Predictive Architecture world model.
-        Args:
-        """
+        """Initialize JEPA with regularizer and prediction cost in addition to base components."""
         super().__init__(encoder, aencoder, predictor)
-        # Anti-Collapse Regularizer
         self.regularizer = regularizer
-        # prediction loss
         self.predcost = predcost
         self.ploss = 0
         self.rloss = 0
 
-    # training forward with a multi-step auto-regressive prediction
-    # observations is a 5d tensor containing a sequence of observations
-    # (Batch, Feature, Time, Height, Width)
-    # actions is a 5d tensor containing a sequence of actions
-    # (Batch, Feature, Time, Height, Width)
-    def forwardn(self, observations, actions, nsteps=1):
-        # Input Encoding
+    @torch.no_grad()
+    def infer(self, observations, actions):
+        """Produce single-step predictions over all sequence elements in parallel."""
+        preds, _ = self.unroll(
+            observations,
+            actions,
+            nsteps=1,
+            unroll_mode="parallel",
+            compute_loss=False,
+            return_all_steps=True,
+        )
+        return preds[0]
+
+    def unroll(
+        self,
+        observations,
+        actions,
+        nsteps=1,
+        unroll_mode="parallel",
+        ctxt_window_time=1,
+        compute_loss=True,
+        return_all_steps=False,
+    ):
+        """Unified multi-step prediction with optional loss computation.
+
+        This function supports both training (with loss computation) and planning/inference
+        (without loss, just state prediction).
+
+        Usage examples:
+        - Training video_jepa: unroll(x, None, nsteps, unroll_mode="parallel", compute_loss=True)
+        - Training ac_video_jepa with RNN: unroll(x, a, nsteps, unroll_mode="autoregressive",
+          ctxt_window_time=1, compute_loss=True)
+        - Planning with ac_video_jepa: unroll(x, a, nsteps, unroll_mode="autoregressive",
+          ctxt_window_time=k, compute_loss=False)
+        - Inference like infern(): unroll(x, a, nsteps, unroll_mode="parallel",
+          compute_loss=False, return_all_steps=True)
+
+        Predictor behavior:
+        - unroll_mode="parallel" (Conv predictor, is_rnn=False):
+          Processes all timesteps in parallel. Uses predictor.context_length to
+          determine how many ground truth frames to re-feed at each iteration.
+          Output: [B, D, T, H', W'] (same length as input, predictions replace non-context).
+          Best for training with full ground truth trajectory available.
+
+        - unroll_mode="autoregressive":
+          Step-by-step prediction with sliding window of ctxt_window_time states.
+          Each step: takes last ctxt_window_time states, predicts next, appends to sequence.
+          Output: [B, D, T_context + nsteps, H', W'] (context + predictions appended).
+          Best for planning/inference where future ground truth is not available.
+          Note: RNN predictors (is_rnn=True) are a special case with ctxt_window_time=1.
+
+        Args:
+            observations: [B, C, T, H, W] - observation sequence
+                For training (compute_loss=True): full trajectory with ground truth
+                For planning (compute_loss=False): context frames only
+            actions: [B, A, T_actions] - action sequence, or None for state-only prediction
+                T_actions >= nsteps required for autoregressive mode
+            nsteps: number of prediction steps
+            unroll_mode: "parallel" or "autoregressive"
+                - "parallel": Process all timesteps, refeed GT context on left
+                - "autoregressive": Step-by-step, append predictions on right
+            ctxt_window_time: Context window size for autoregressive mode.
+                For RNN predictors (is_rnn=True), this is effectively 1.
+            compute_loss: Whether to compute losses (requires ground truth observations)
+            return_all_steps: If True, return list of predictions at each step (like infern).
+                If False, return only the final predicted states.
+
+        Returns:
+            Tuple of (predicted_states, losses) where:
+            - If return_all_steps=False:
+              predicted_states: [B, D, T_out, H', W'] - final predicted state sequence
+            - If return_all_steps=True:
+              predicted_states: List[Tensor] of length nsteps, each [B, D, T_out, H', W']
+            - losses: None if compute_loss=False, otherwise tuple of 5 elements:
+              (total_loss, reg_loss, reg_loss_unweighted, reg_loss_dict, pred_loss)
+        """
         state = self.encoder(observations)
-        context_length = self.predictor.context_length
+        context_length = getattr(self.predictor, "context_length", 0)
 
-        # VC loss
-        rloss, rloss_unweight, rloss_dict = self.regularizer(state, actions)
-
-        if actions is not None:
-            actions = self.action_encoder(actions)
-
-        predi = state
-        ploss = 0.0
-        if self.single_unroll:
-            curr_state = state[:, :, :1]  # (b, d, h, w)
-            for i in range(nsteps):
-                curr_action = actions[:, :, i : i + 1]
-                curr_state = self.predictor(curr_state, curr_action)
-                ploss += self.predcost(curr_state, state[:, :, i + 1 : i + 2]) / nsteps
+        # Compute regularization loss if needed
+        if compute_loss:
+            rloss, rloss_unweight, rloss_dict = self.regularizer(state, actions)
+            ploss = 0.0
         else:
-            predi = state  # (b, d, t, h, w)
-            # If predictor treats timesteps as batch dimension, reshaping b t c h w -> (b t) c h w,
-            # Then receptive field of predictor is one timestep only, so it is time-causal.
+            rloss = rloss_unweight = rloss_dict = ploss = None
+
+        # Encode actions
+        if actions is not None:
+            actions_encoded = self.action_encoder(actions)
+        else:
+            actions_encoded = None
+
+        # Collect all steps if requested
+        all_steps = [] if return_all_steps else None
+
+        # Parallel mode: process all timesteps at once, refeed GT context
+        if unroll_mode == "parallel":
+            predicted_states = state
             for _ in range(nsteps):
-                # Discard latest timestep prediction since there is no
-                # visual embedding target for it
-                predi = self.predictor(predi, actions)[:, :, :-1]
-                # Refeed 1st context_length grountruth embedding timesteps on the left
-                # as context for the next call to the predictor
-                predi = torch.cat((state[:, :, :context_length], predi), dim=2)
-                ploss += self.predcost(state, predi) / nsteps
+                # Predict all timesteps, discard last (no target for it)
+                predicted_states = self.predictor(predicted_states, actions_encoded)[
+                    :, :, :-1
+                ]
+                # Collect step if requested
+                if return_all_steps:
+                    all_steps.append(predicted_states)
+                # Refeed ground truth context on the left
+                predicted_states = torch.cat(
+                    (state[:, :, :context_length], predicted_states), dim=2
+                )
+                if compute_loss:
+                    ploss += self.predcost(state, predicted_states) / nsteps
 
-        # compute total loss here
-        loss = rloss + ploss
-        return loss, rloss, rloss_unweight, rloss_dict, ploss
+        # Autoregressive mode: step-by-step with sliding window
+        # Note: RNN predictors (is_rnn=True) are a special case with ctxt_window_time=1
+        elif unroll_mode == "autoregressive":
+            if actions is not None and nsteps > actions.size(2):
+                raise ValueError(
+                    f"nsteps ({nsteps}) larger than action sequence length ({actions.size(2)})"
+                )
+            # For RNN predictors, force ctxt_window_time=1
+            effective_ctxt_window = 1 if self.single_unroll else ctxt_window_time
+
+            predicted_states = state[:, :, :effective_ctxt_window]
+            for i in range(nsteps):
+                # Take last ctxt_window_time states
+                context_states = predicted_states[:, :, -effective_ctxt_window:]
+                # Take corresponding actions
+                if actions_encoded is not None:
+                    context_actions = actions_encoded[
+                        :, :, max(0, i + 1 - effective_ctxt_window) : i + 1
+                    ]
+                else:
+                    context_actions = None
+                # Predict and take only last timestep
+                pred_step = self.predictor(context_states, context_actions)[:, :, -1:]
+                # Append prediction to sequence
+                predicted_states = torch.cat([predicted_states, pred_step], dim=2)
+                # Collect step if requested
+                if return_all_steps:
+                    all_steps.append(predicted_states.clone())
+                if compute_loss:
+                    ploss += (
+                        self.predcost(pred_step, state[:, :, i + 1 : i + 2]) / nsteps
+                    )
+        else:
+            raise ValueError(f"Unknown unroll_mode: {unroll_mode}")
+
+        # Compute total loss and return
+        if compute_loss:
+            loss = rloss + ploss
+            losses = (loss, rloss, rloss_unweight, rloss_dict, ploss)
+        else:
+            losses = None
+
+        # Return all steps or just final state
+        if return_all_steps:
+            return all_steps, losses
+        else:
+            return predicted_states, losses
 
 
-################################################################
-# a container that contains a JEPA and a trainable prediction head.
-# the prediction head can be used as a decoder:
-# simply set the targets are identical to the observations.
 class JEPAProbe(nn.Module):
+    """JEPA with a trainable prediction head. The JEPA encoder is kept fixed."""
+
     def __init__(self, jepa, head, hcost):
-        """
-        A JEPA probe that includes a prediction head that
-        can be trained supervised.
-        The JEPA is kept fixed.
-        """
+        """Initialize with a frozen JEPA, prediction head, and head loss function."""
         super().__init__()
         self.jepa = jepa
-        # prediction head for a supervised task
         self.head = head
-        # loss for the prediction head
         self.hcost = hcost
 
-    # encode a sequence through the JEPA
-    # run the encoded state through the head and
-    # return the result
     @torch.no_grad()
     def infer(self, observations):
+        """Encode observations through JEPA and apply the prediction head."""
         state = self.jepa.encode(observations)
         return self.head(state)
 
@@ -202,11 +229,9 @@ class JEPAProbe(nn.Module):
         """
         return self.head(embeddings)
 
-    # forward to train the head
     def forward(self, observations, targets):
+        """Forward pass for training the head (JEPA encoder gradients are detached)."""
         with torch.no_grad():
             state = self.jepa.encode(observations)
-        # run the prediction head, but do not
-        # backprop through the JEPA encoder
         output = self.head(state.detach())
         return self.hcost(output, targets)

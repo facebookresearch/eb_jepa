@@ -683,7 +683,7 @@ class WallDataset(DotDataset):
             # cw_count = math.ceil(self.config.batch_size * self.config.cross_wall_rate)
             cw_count = np.random.rand() < self.config.cross_wall_rate
             if cw_count:
-                (cw_locations, cw_actions, _) = (
+                cw_locations, cw_actions, _ = (
                     self.generate_cross_wall_state_and_actions(
                         wall_locs=wall_locs[:cw_count],
                         door_locs=door_locs[:cw_count],
@@ -701,7 +701,7 @@ class WallDataset(DotDataset):
             bump_count = min(bump_count, 1 - modified_count)
 
             if bump_count > 0:
-                (bump_locations, bump_actions) = (
+                bump_locations, bump_actions = (
                     self.generate_wall_bump_state_and_actions(
                         wall_locs=wall_locs[
                             modified_count : modified_count + bump_count
@@ -1036,7 +1036,7 @@ class WallDataset(DotDataset):
             states_with_walls = self.normalizer.normalize_state(states_with_walls)
             locations = self.normalizer.normalize_location(locations)
 
-        # make it conform to eb-jepa codebase:
+        # make it conform to eb_jepa codebase:
         # states: B, T, C, H, W --> B, F, T, H, W
         states_with_walls = states_with_walls.permute(0, 2, 1, 3, 4)
         # also rid of the last timestep to make timesteps aligned with action

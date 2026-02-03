@@ -3,65 +3,25 @@ logging:
   wandb_group:
   wandb_sweep:
   log_every: 10
-  exp_suffix: 26-01-14
+  exp_suffix: 26-01-15
   save_every_n_epochs: 1
-  tqdm_silent: true
+  tqdm_silent: false
 meta:
-  quick_debug: true
-  plan_eval_only_mode: false
-  light_eval_only_mode: false
-  ckpt_dir: checkpoints
   model_folder:
   load_model: true
-  load_checkpoint: # e-9.pth.tar
   enable_plan_eval: true
   eval_every_itr: -1
   light_eval_freq: 50
-  start_probing_after: 0
   seed: 1
 data:
   env_name: two_rooms
-  action_noise: 1
-  action_angle_noise: 0.2
-  action_step_mean: 1.0
-  action_step_std: 0.4
-  action_lower_bd: 0.2
-  action_upper_bd: 1.8
+  # Training-specific overrides (base config in eb_jepa/datasets/two_rooms/data_config.yaml)
   batch_size: 384
-  device: cpu
-  dot_std: 1.3
-  border_wall_loc: 5
-  fix_wall_batch_k:
-  fix_wall: false # false to randomize both wall and door loc
-  fix_door_location: 18
-  fix_wall_location: 32
-  exclude_wall_train: ''
-  exclude_door_train: ''
-  only_wall_val: ''
-  only_door_val: ''
-  wall_padding: 20
-  door_padding: 10
-  wall_width: 3
-  door_space: 4
-  num_train_layouts: -1
-  cross_wall_rate: 0.35
-  dup_traj_rate: 0.
-  expert_cross_wall_rate: 0
-  wall_bump_rate: 0.0
-  img_size: 65
-  max_step: 1
-  sample_length: 17 # 17 in PLDM | 90 to eval long rollout
-  n_steps: 91
-  n_steps_reduce_factor: 1
-  size: 100000
-  val_size: 10000
-  train: true
-  repeat_actions: 1
-  normalize: true
-  # new
   num_workers: 16
   pin_mem: true
   persistent_workers: true
+training:
+  use_amp: true
   dtype: bfloat16
 model:
   compile: true
@@ -93,3 +53,14 @@ optim:
 eval:
   plan_cfg_path: examples/ac_video_jepa/cfgs/planning_mppi.yaml # eb_jepa/planning_mppi.yaml
   eval_cfg_path: examples/ac_video_jepa/cfgs/eval.yaml
+
+# --- Parameters used when running with --full-sweep
+# By default, only the parameters specified above are used
+sweep:
+  # Sweep grid for AC video JEPA hyperparameter search
+  param_grid:
+    model.regularizer.cov_coeff: [8, 12]
+    model.regularizer.std_coeff: [8, 16]
+    model.regularizer.sim_coeff_t: [8, 12, 16]
+    model.regularizer.idm_coeff: [1, 2]
+    meta.seed: [1, 1000, 10000]

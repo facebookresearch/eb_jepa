@@ -7,12 +7,10 @@ from sklearn.metrics import average_precision_score
 
 from eb_jepa.nn_utils import TemporalBatchMixin, init_module_weights
 
-######################################################
-# Basic architectural modules
 
-
-# a simple 3D convnet with 2 layers.
 class conv3d2(nn.Sequential):
+    """Simple 3D convnet with 2 layers."""
+
     def __init__(self, in_d, h_d, out_d, tk, ts, sk, ss, pad):
         super(conv3d2, self).__init__(
             nn.Conv3d(
@@ -38,6 +36,8 @@ class conv3d2(nn.Sequential):
 
 
 class ResidualBlock(nn.Module):
+    """Standard residual block with skip connection."""
+
     def __init__(self, in_channels, out_channels, stride=1):
         super(ResidualBlock, self).__init__()
 
@@ -77,7 +77,7 @@ class ResidualBlock(nn.Module):
 class ResNet5(TemporalBatchMixin, nn.Module):
     """
     A lightweight ResNet with 5 layers (2 blocks).
-    Supports both 4D (B,C,H,W) and 5D (B,C,T,H,W) inputs via TemporalBatchMixin.
+    Supports both 4D [B, C, H, W] and 5D [B, C, T, H, W] inputs via TemporalBatchMixin.
     """
 
     def __init__(self, in_d, h_d, out_d, s1=1, s2=1, s3=1, avg_pool=False):
@@ -105,6 +105,8 @@ class ResNet5(TemporalBatchMixin, nn.Module):
 
 
 class SimplePredictor(nn.Module):
+    """Wrapper that concatenates states and actions channel-wise before prediction."""
+
     def __init__(self, predictor, context_length):
         super().__init__()
         self.predictor = predictor
@@ -120,8 +122,8 @@ class StateOnlyPredictor(SimplePredictor):
 
     def forward(self, x, a):
         # action not used on purpose
-        prev_state = x[:, :, :-1]  # (B, C, T-1, H, W)
-        next_state = x[:, :, 1:]  # (B, C, T-1, H, W)
+        prev_state = x[:, :, :-1]  # [B, C, T-1, H, W]
+        next_state = x[:, :, 1:]  # [B, C, T-1, H, W]
         combined_xa = torch.cat((prev_state, next_state), dim=1)
         return self.predictor(combined_xa)
 
@@ -130,7 +132,7 @@ class ResUNet(TemporalBatchMixin, nn.Module):
     """
     A small UNet with residual encoder blocks and transposed-conv upsampling.
     Channels scale like h, 2h, 4h, 8h. Output keeps the input HxW.
-    Supports both 4D (B,C,H,W) and 5D (B,C,T,H,W) inputs via TemporalBatchMixin.
+    Supports both 4D [B, C, H, W] and 5D [B, C, T, H, W] inputs via TemporalBatchMixin.
     """
 
     def __init__(self, in_d, h_d, out_d, is_rnn=False):
@@ -203,6 +205,8 @@ class ResUNet(TemporalBatchMixin, nn.Module):
 
 
 class Projector(nn.Module):
+    """MLP projector built from a spec string like '256-512-128'."""
+
     def __init__(self, mlp_spec):
         super().__init__()
         layers = []
@@ -220,14 +224,15 @@ class Projector(nn.Module):
 
 
 class DetHead(nn.Module):
+    """Detection head that pools features and predicts binary maps."""
 
     def __init__(self, in_d, h_d, out_d):
         super().__init__()
         self.head = nn.Sequential(conv3d2(in_d, h_d, out_d, 1, 1, 3, 1, "same"))
         self.apply(init_module_weights)
 
-    # x: output of predictor (or autoregressive)
     def forward(self, x):
+        """Forward pass on predictor output of shape (B, C, T, H, W)."""
         # (Batch, Feature, Time, Height, Width)
         # [8, 8, T, 8, 8]
         x = [F.adaptive_avg_pool2d(x[:, :, t], (8, 8)) for t in range(x.shape[2])]
@@ -360,11 +365,13 @@ class ImpalaEncoder(nn.Module):
 
     def forward(self, x):
         """
-        x: (bs, ch, t, w, h)
-        out: (bs, dim, t, 1, 1)
+        Args:
+            x: [B, C, T, H, W]
+        Returns:
+            out: [B, D, T, 1, 1]
         """
 
-        # (bs, ch, t, w, h) --> (t, bs, ch, w, h)
+        # [B, C, T, H, W] --> [T, B, C, H, W]
         (
             _,
             _,
@@ -403,9 +410,10 @@ class ImpalaEncoder(nn.Module):
 
 
 class RNNPredictor(nn.Module):
+    """GRU-based predictor for single-step state propagation."""
+
     def __init__(
         self,
-        # parent inputs
         hidden_size: int = 512,
         action_dim: Optional[int] = 2,
         num_layers: int = 1,
@@ -427,16 +435,17 @@ class RNNPredictor(nn.Module):
 
     def forward(self, state, action):
         """
-        Propagate one step forward
-        Parameters:
-            state: (bs, dim, 1, 1, 1)
-            action: (bs, a_dim, 1)
-        Output:
-            Output: next_state (bs, dim, 1, 1, 1)
+        Propagate one step forward.
+
+        Args:
+            state: [B, D, 1, 1, 1]
+            action: [B, A, 1]
+        Returns:
+            next_state: [B, D, 1, 1, 1]
         """
         # This only does one step
-        rnn_state = state.flatten(1, 4).unsqueeze(0).contiguous()  # (1, bs, dim)
-        rnn_input = action.squeeze(-1).unsqueeze(0).contiguous()  # (1, bs, a_dim)
+        rnn_state = state.flatten(1, 4).unsqueeze(0).contiguous()  # [1, B, D]
+        rnn_input = action.squeeze(-1).unsqueeze(0).contiguous()  # [1, B, A]
 
         next_state, _ = self.rnn(rnn_input, rnn_state)
 

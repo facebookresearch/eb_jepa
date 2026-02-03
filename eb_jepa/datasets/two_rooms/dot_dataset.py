@@ -129,8 +129,6 @@ class DotDataset(torch.utils.data.Dataset):
             + self.padding
         )
 
-        ## TODO: move wall logic to wall.py
-
         left_walls = wall_locs - self.config.wall_width // 2
         right_walls = wall_locs + self.config.wall_width // 2
 
@@ -197,7 +195,6 @@ class DotDataset(torch.utils.data.Dataset):
         sample = self.generate_transitions(
             start_location, actions, bias_angle, walls=walls
         )
-        # TODO: fix trajectories, change wall positions
 
         return sample
 

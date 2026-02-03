@@ -6,44 +6,4 @@ env:
   level: normal
 data:
   env_name: two_rooms
-  action_noise: 1
-  action_angle_noise: 0.2
-  action_step_mean: 1.0
-  action_step_std: 0.4
-  action_lower_bd: 0.2
-  action_upper_bd: 1.8
-  batch_size: 64
-  device: cpu
-  dot_std: 1.3
-  border_wall_loc: 5
-  fix_wall_batch_k:
-  fix_wall: false # false to randomize both wall and door loc
-  fix_door_location: 18
-  fix_wall_location: 32
-  exclude_wall_train: ''
-  exclude_door_train: ''
-  only_wall_val: ''
-  only_door_val: ''
-  wall_padding: 20
-  door_padding: 10
-  wall_width: 3
-  door_space: 4
-  num_train_layouts: -1
-  cross_wall_rate: 0.35
-  dup_traj_rate: 0.
-  expert_cross_wall_rate: 0
-  wall_bump_rate: 0.0
-  img_size: 65
-  max_step: 1
-  sample_length: 17 # 17 in PLDM | 90 to eval long rollout
-  n_steps: 91
-  n_steps_reduce_factor: 1
-  size: 100000
-  val_size: 10000
-  train: true
-  repeat_actions: 1
-  normalize: true
-  # new
-  num_workers: 0
-  pin_mem: false
-  persistent_workers: false
+  # Eval-specific overrides (base config in eb_jepa/datasets/two_rooms/data_config.yaml)

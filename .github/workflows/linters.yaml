@@ -14,7 +14,7 @@ on:
     paths:
       - 'eb_jepa/**'
       - 'examples/**'
-      - 'tests/' 
+      - 'tests/'
 
 jobs:
   run-linters:
@@ -30,12 +30,12 @@ jobs:
       - name: Set up Python
         run: uv python install
       - name: Install the project
-        run: uv sync --locked --all-extras --dev
+        run: uv sync --all-extras --dev
       - name: Set lint paths
         run: echo "lint_paths=eb_jepa examples tests" >> "$GITHUB_ENV"
       - name: Run isort
         run: |
-          uv run python -m isort $lint_paths --check 
+          uv run python -m isort $lint_paths --check
       - name: Run black
         if: always()
         run: |
