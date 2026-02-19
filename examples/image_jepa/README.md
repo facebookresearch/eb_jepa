@@ -4,6 +4,16 @@ This example demonstrates how to train a Joint Embedding Predictive Architecture
 
 ![Image JEPA Architecture](assets/arch_figure.png)
 
+## Quick Start with Google Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/DematteisGiacomo/eb_jepa/blob/add-colab-notebook/examples/image_jepa/colab_training.ipynb)
+
+Try out Image JEPA training directly in your browser using our Colab notebook. The notebook provides:
+- Pre-configured environment setup
+- Optimized hyperparameters for Colab GPUs
+- Interactive training and visualization
+- No local setup required
+
 ## Features
 
 - **Image-only training**: Training from unlabeled image data
