@@ -392,7 +392,7 @@ def run(
     transform = get_train_transforms()
 
     # Use EBJEPA_DSETS environment variable if set, otherwise fall back to config
-    data_dir = os.environ.get("EBJEPA_DSETS")
+    data_dir = os.environ.get("EBJEPA_DSETS", cfg.data.data_dir)
     logger.info(f"Using data directory: {data_dir}")
 
     base_train_dataset = CIFAR10(

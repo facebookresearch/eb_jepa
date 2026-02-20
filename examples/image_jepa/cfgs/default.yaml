@@ -9,6 +9,7 @@ data:
   dataset: cifar10
   batch_size: 256
   num_workers: 4
+  data_dir: "eb_jepa/datasets"  # Default data directory path
 
 model:
   # Backbone
