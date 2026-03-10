@@ -22,7 +22,7 @@ from eb_jepa.architectures import (
     ResNet5,
     ResUNet,
     RNNPredictor,
-    StateOnlyPredictor,
+    SimplePredictor,
 )
 from eb_jepa.jepa import JEPA
 from eb_jepa.losses import SquareLossSeq, VC_IDM_Sim_Regularizer, VCLoss
@@ -48,7 +48,7 @@ def create_video_jepa_model(device="cpu"):
 
     encoder = ResNet5(dobs, henc, dstc)
     predictor_model = ResUNet(2 * dstc, hpre, dstc)
-    predictor = StateOnlyPredictor(predictor_model, context_length=2)
+    predictor = SimplePredictor(predictor_model, context_length=2)
     projector = Projector(f"{dstc}-{dstc*4}-{dstc*4}")
     regularizer = VCLoss(std_coeff=10.0, cov_coeff=100.0, proj=projector)
     ploss = SquareLossSeq(projector)

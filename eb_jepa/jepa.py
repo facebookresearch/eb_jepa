@@ -1,3 +1,5 @@
+from collections import deque
+
 import torch
 import torch.nn as nn
 
@@ -120,6 +122,7 @@ class JEPA(JEPAbase):
               (total_loss, reg_loss, reg_loss_unweighted, reg_loss_dict, pred_loss)
         """
         state = self.encoder(observations)
+        B, C, T, H, W = state.shape
         context_length = getattr(self.predictor, "context_length", 0)
 
         # Compute regularization loss if needed
@@ -138,23 +141,47 @@ class JEPA(JEPAbase):
         # Collect all steps if requested
         all_steps = [] if return_all_steps else None
 
-        # Parallel mode: process all timesteps at once, refeed GT context
+        # Parallel mode: rolling buffer of size context_length.
+        # The buffer starts filled with GT frames and progressively replaces
+        # the oldest slot with each new prediction:
+        #   step 1: [GT(1), GT(2), GT(3)]
+        #   step 2: [GT(2), GT(3), pred(1)]
+        #   step 3: [GT(3), pred(1), pred(2)]
+        #   step 4: [pred(1), pred(2), pred(3)]
+        # Older buffer slots are trimmed to the current T_prime as it shrinks.
         if unroll_mode == "parallel":
-            predicted_states = state
-            for _ in range(nsteps):
-                # Predict all timesteps, discard last (no target for it)
-                predicted_states = self.predictor(predicted_states, actions_encoded)[
-                    :, :, :-1
-                ]
-                # Collect step if requested
+            T_prime_0 = T - context_length + 1
+            buffer = deque(
+                [state[:, :, i : i + T_prime_0] for i in range(context_length)],
+                maxlen=context_length,
+            )
+            for k in range(nsteps):
+                T_prime = T - context_length + 1 - k
+
+                state_slices = [s[:, :, :T_prime] for s in buffer]
+                state_buffer = torch.cat(state_slices, dim=1)  # (B, C*L, T', H, W)
+
+                if actions_encoded is not None:
+                    action_slices = [
+                        actions_encoded[:, :, k + i : k + i + T_prime]
+                        for i in range(context_length)
+                    ]
+                    action_buffer = torch.cat(action_slices, dim=1)
+                else:
+                    action_buffer = None
+
+                predictor_out = self.predictor(state_buffer, action_buffer)
+                pred = predictor_out[:, :, :-1]  # (B, C, T'-1, H, W)
+                buffer.append(pred)  # drops oldest slot, adds latest prediction
+
                 if return_all_steps:
-                    all_steps.append(predicted_states)
-                # Refeed ground truth context on the left
-                predicted_states = torch.cat(
-                    (state[:, :, :context_length], predicted_states), dim=2
-                )
+                    all_steps.append(pred)
+
                 if compute_loss:
-                    ploss += self.predcost(state, predicted_states) / nsteps
+                    target = state[:, :, context_length + k : T]
+                    ploss += self.predcost(target, pred) / nsteps
+
+            predicted_states = pred
 
         # Autoregressive mode: step-by-step with sliding window
         # Note: RNN predictors (is_rnn=True) are a special case with ctxt_window_time=1

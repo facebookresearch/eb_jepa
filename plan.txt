@@ -1,0 +1,256 @@
+Plan: Fix parallel unroll to use real states as context anchors
+Context
+The unroll() parallel mode in JEPA has a correctness bug: after each iteration, it re-feeds only the first context_length real states on the left, replacing all other positions with predictions. This means that from iteration 2 onward, some context entries are predicted states where real ground truth exists and should be used instead.
+
+For example with context_length=2, in iteration 2 the pair (s*(3), s*(4)) → s**(5) uses a predicted s*(3) as the left anchor even though real s_3 is available.
+
+The fix moves context-window stacking from StateOnlyPredictor.forward into unroll(), giving the unroll loop full control over which states are real vs predicted. Each iteration then uses:
+
+context_length - 1 real ground-truth state slices (shifted by k)
+1 predicted entry (the output of the previous iteration) as the rightmost context slot
+Mathematical derivation (key shapes)
+With T encoded frames and context_length = L:
+
+At step k (0-indexed):
+
+T' = T - L + 1 - k
+State buffer: L tensors each (B, C, T', H, W)
+i = 0..L-2: state[:, :, k+i : k+i+T'] (real GT)
+i = L-1: prev_predictions from step k-1 (same shape); at k=0 also uses real GT
+Predictor output: (B, C, T', H, W)
+prev_predictions = predictor_out[:, :, :-1] → (B, C, T'-1, H, W) for next step
+Loss target: state[:, :, L+k : T] has T - L - k = T' - 1 frames ✓ (dimensions match)
+Files to modify
+1. eb_jepa/jepa.py — unroll() parallel mode (lines 141–157)
+Replace the loop body with a rolling context buffer:
+
+
+if unroll_mode == "parallel":
+    prev_predictions = None
+    for k in range(nsteps):
+        T_prime = T - context_length + 1 - k
+
+        # Build state context buffer:
+        # - first L-1 slots: real GT states shifted by k
+        # - last slot: prev_predictions (or real GT on first step)
+        if k == 0:
+            state_slices = [state[:, :, i : i + T_prime] for i in range(context_length)]
+        else:
+            state_slices = [
+                state[:, :, k + i : k + i + T_prime] for i in range(context_length - 1)
+            ]
+            state_slices.append(prev_predictions)
+
+        state_buffer = torch.cat(state_slices, dim=1)  # (B, C*L, T', H, W)
+
+        # Build action buffer (same window logic, if actions present)
+        if actions_encoded is not None:
+            action_slices = [
+                actions_encoded[:, :, k + i : k + i + T_prime]
+                for i in range(context_length)
+            ]
+            action_buffer = torch.cat(action_slices, dim=1)
+        else:
+            action_buffer = None
+
+        predictor_out = self.predictor(state_buffer, action_buffer)  # (B, C, T', H, W)
+        prev_predictions = predictor_out[:, :, :-1]  # (B, C, T'-1, H, W)
+
+        if return_all_steps:
+            all_steps.append(prev_predictions)
+
+        if compute_loss:
+            target = state[:, :, context_length + k : T]  # (B, C, T'-1, H, W)
+            ploss += self.predcost(target, prev_predictions) / nsteps
+
+    predicted_states = prev_predictions  # return last step's predictions
+Also: at line 122, B, C, T, H, W = state.shape must be extracted before the branch (it's already used by the autoregressive branch so this is safe; just make sure it's present at the top of the unroll logic after encoding).
+
+2. eb_jepa/architectures.py — Simplify / remove StateOnlyPredictor
+StateOnlyPredictor.forward currently does the context-stacking:
+
+
+prev_state = x[:, :, :-1]
+next_state = x[:, :, 1:]
+combined_xa = torch.cat((prev_state, next_state), dim=1)
+return self.predictor(combined_xa)
+After the change, unroll() builds the stacked state_buffer before calling the predictor. StateOnlyPredictor becomes a pass-through that just ignores actions:
+
+Option A (minimal change): Simplify StateOnlyPredictor.forward:
+
+
+def forward(self, state_buffer, actions_buffer):
+    # Context stacking is now handled in unroll(); just forward the buffer.
+    # actions are ignored for state-only prediction.
+    return self.predictor(state_buffer)
+Option B (user's preferred): Remove StateOnlyPredictor entirely and update SimplePredictor to handle a=None:
+
+
+class SimplePredictor(nn.Module):
+    def forward(self, x, a):
+        if a is not None:
+            return self.predictor(torch.cat([x, a], dim=1))
+        return self.predictor(x)
+Then in video_jepa/main.py and tests, replace StateOnlyPredictor(...) with SimplePredictor(...).
+
+Recommendation: Option B is cleaner and matches the user's intent. Note: the user's proposed StateOnlyPredictor.forward called self.predictor(state_buffer, actions_buffer) which would fail since ResUNet takes a single tensor — Option B avoids this issue entirely.
+
+3. examples/video_jepa/main.py (line 131)
+If Option B is chosen, update import and construction:
+
+
+# Before:
+from eb_jepa.architectures import StateOnlyPredictor
+predictor_model = ResUNet(2 * cfg.model.dstc, cfg.model.hpre, cfg.model.dstc)
+predictor = StateOnlyPredictor(predictor_model, context_length=2)
+
+# After:
+from eb_jepa.architectures import SimplePredictor
+predictor_model = ResUNet(2 * cfg.model.dstc, cfg.model.hpre, cfg.model.dstc)
+predictor = SimplePredictor(predictor_model, context_length=2)
+No architecture change: ResUNet input channels = context_length * dstc = 2 * dstc is unchanged.
+
+4. tests/test_jepa_output_formats.py
+Update imports: replace StateOnlyPredictor with SimplePredictor
+Update create_video_jepa_model() to use SimplePredictor
+The existing shape assertions in test_unroll_parallel_mode_output_format check preds[0].shape[2] == T - context_length, which still holds (step 0: T'-1 = T - context_length) ✓
+Shapes of preds[1], preds[2], ... decrease by 1 each step (T-L-1, T-L-2, ...) — no assertions on those in existing tests, so they pass as-is
+Return shape of predicted_states when return_all_steps=False changes from (B, C, T) to (B, C, T-L-nsteps+1) — verify no assertions rely on this
+Verification
+Run existing tests: python tests/test_jepa_output_formats.py — all parallel and autoregressive tests should pass
+Manually verify step-0 predictions are identical to the old code (same input context, same output)
+Verify step-1 context: for context_length=2, at step k=1:
+Slot 0 = state[:, :, 1:T'] (real s_1, ..., s_{T-2}) ← shifted right by 1 vs step 0
+Slot 1 = prev_predictions from step 0 (s*_2, ..., s*_{T-2})
+Predictor at position j receives [s_{j+1}, s*_{j+2}] — both the anchor is real and only the right edge is predicted ✓
+Verify dimensions: at each step, target.shape[2] == prev_predictions.shape[2] (should be T - L - k)
+
+
+=== next changes === 
+
+Fix parallel unroll to use real states as context anchors
+Context
+The unroll() parallel mode in JEPA has a correctness bug: after each iteration, it re-feeds only the first context_length real states on the left, replacing all other positions with predictions. This means that from iteration 2 onward, some context entries are predicted states where real ground truth exists and should be used instead.
+
+For example with context_length=2, in iteration 2 the pair (s*(3), s*(4)) → s**(5) uses a predicted s*(3) as the left anchor even though real s_3 is available.
+
+The fix moves context-window stacking from StateOnlyPredictor.forward into unroll(), giving the unroll loop full control over which states are real vs predicted. Each iteration then uses:
+
+context_length - 1 real ground-truth state slices (shifted by k)
+1 predicted entry (the output of the previous iteration) as the rightmost context slot
+Mathematical derivation (key shapes)
+With T encoded frames and context_length = L:
+
+At step k (0-indexed):
+
+T' = T - L + 1 - k
+State buffer: L tensors each (B, C, T', H, W)
+i = 0..L-2: state[:, :, k+i : k+i+T'] (real GT)
+i = L-1: prev_predictions from step k-1 (same shape); at k=0 also uses real GT
+Predictor output: (B, C, T', H, W)
+prev_predictions = predictor_out[:, :, :-1] → (B, C, T'-1, H, W) for next step
+Loss target: state[:, :, L+k : T] has T - L - k = T' - 1 frames ✓ (dimensions match)
+Files to modify
+1. eb_jepa/jepa.py — unroll() parallel mode (lines 141–157)
+Replace the loop body with a rolling context buffer:
+
+
+if unroll_mode == "parallel":
+    prev_predictions = None
+    for k in range(nsteps):
+        T_prime = T - context_length + 1 - k
+
+        # Build state context buffer:
+        # - first L-1 slots: real GT states shifted by k
+        # - last slot: prev_predictions (or real GT on first step)
+        if k == 0:
+            state_slices = [state[:, :, i : i + T_prime] for i in range(context_length)]
+        else:
+            state_slices = [
+                state[:, :, k + i : k + i + T_prime] for i in range(context_length - 1)
+            ]
+            state_slices.append(prev_predictions)
+
+        state_buffer = torch.cat(state_slices, dim=1)  # (B, C*L, T', H, W)
+
+        # Build action buffer (same window logic, if actions present)
+        if actions_encoded is not None:
+            action_slices = [
+                actions_encoded[:, :, k + i : k + i + T_prime]
+                for i in range(context_length)
+            ]
+            action_buffer = torch.cat(action_slices, dim=1)
+        else:
+            action_buffer = None
+
+        predictor_out = self.predictor(state_buffer, action_buffer)  # (B, C, T', H, W)
+        prev_predictions = predictor_out[:, :, :-1]  # (B, C, T'-1, H, W)
+
+        if return_all_steps:
+            all_steps.append(prev_predictions)
+
+        if compute_loss:
+            target = state[:, :, context_length + k : T]  # (B, C, T'-1, H, W)
+            ploss += self.predcost(target, prev_predictions) / nsteps
+
+    predicted_states = prev_predictions  # return last step's predictions
+Also: at line 122, B, C, T, H, W = state.shape must be extracted before the branch (it's already used by the autoregressive branch so this is safe; just make sure it's present at the top of the unroll logic after encoding).
+
+2. eb_jepa/architectures.py — Simplify / remove StateOnlyPredictor
+StateOnlyPredictor.forward currently does the context-stacking:
+
+
+prev_state = x[:, :, :-1]
+next_state = x[:, :, 1:]
+combined_xa = torch.cat((prev_state, next_state), dim=1)
+return self.predictor(combined_xa)
+After the change, unroll() builds the stacked state_buffer before calling the predictor. StateOnlyPredictor becomes a pass-through that just ignores actions:
+
+Option A (minimal change): Simplify StateOnlyPredictor.forward:
+
+
+def forward(self, state_buffer, actions_buffer):
+    # Context stacking is now handled in unroll(); just forward the buffer.
+    # actions are ignored for state-only prediction.
+    return self.predictor(state_buffer)
+Option B (user's preferred): Remove StateOnlyPredictor entirely and update SimplePredictor to handle a=None:
+
+
+class SimplePredictor(nn.Module):
+    def forward(self, x, a):
+        if a is not None:
+            return self.predictor(torch.cat([x, a], dim=1))
+        return self.predictor(x)
+Then in video_jepa/main.py and tests, replace StateOnlyPredictor(...) with SimplePredictor(...).
+
+Recommendation: Option B is cleaner and matches the user's intent. Note: the user's proposed StateOnlyPredictor.forward called self.predictor(state_buffer, actions_buffer) which would fail since ResUNet takes a single tensor — Option B avoids this issue entirely.
+
+3. examples/video_jepa/main.py (line 131)
+If Option B is chosen, update import and construction:
+
+
+# Before:
+from eb_jepa.architectures import StateOnlyPredictor
+predictor_model = ResUNet(2 * cfg.model.dstc, cfg.model.hpre, cfg.model.dstc)
+predictor = StateOnlyPredictor(predictor_model, context_length=2)
+
+# After:
+from eb_jepa.architectures import SimplePredictor
+predictor_model = ResUNet(2 * cfg.model.dstc, cfg.model.hpre, cfg.model.dstc)
+predictor = SimplePredictor(predictor_model, context_length=2)
+No architecture change: ResUNet input channels = context_length * dstc = 2 * dstc is unchanged.
+
+4. tests/test_jepa_output_formats.py
+Update imports: replace StateOnlyPredictor with SimplePredictor
+Update create_video_jepa_model() to use SimplePredictor
+The existing shape assertions in test_unroll_parallel_mode_output_format check preds[0].shape[2] == T - context_length, which still holds (step 0: T'-1 = T - context_length) ✓
+Shapes of preds[1], preds[2], ... decrease by 1 each step (T-L-1, T-L-2, ...) — no assertions on those in existing tests, so they pass as-is
+Return shape of predicted_states when return_all_steps=False changes from (B, C, T) to (B, C, T-L-nsteps+1) — verify no assertions rely on this
+Verification
+Run existing tests: python tests/test_jepa_output_formats.py — all parallel and autoregressive tests should pass
+Manually verify step-0 predictions are identical to the old code (same input context, same output)
+Verify step-1 context: for context_length=2, at step k=1:
+Slot 0 = state[:, :, 1:T'] (real s_1, ..., s_{T-2}) ← shifted right by 1 vs step 0
+Slot 1 = prev_predictions from step 0 (s*_2, ..., s*_{T-2})
+Predictor at position j receives [s_{j+1}, s*_{j+2}] — both the anchor is real and only the right edge is predicted ✓
+Verify dimensions: at each step, target.shape[2] == prev_predictions.shape[2] (should be T - L - k)

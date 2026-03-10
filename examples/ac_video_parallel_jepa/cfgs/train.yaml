@@ -1,0 +1,68 @@
+logging:
+  log_wandb: true
+  wandb_group:
+  wandb_sweep:
+  log_every: 10
+  exp_suffix: 26-01-15
+  save_every_n_epochs: 1
+  tqdm_silent: false
+meta:
+  model_folder:
+  load_model: true
+  enable_plan_eval: false
+  eval_every_itr: -1
+  light_eval_freq: 50
+  seed: 1
+data:
+  env_name: two_rooms
+  # Training-specific overrides (base config in eb_jepa/datasets/two_rooms/data_config.yaml)
+  batch_size: 6
+  num_workers: 1
+  pin_mem: true
+  persistent_workers: true
+training:
+  use_amp: true
+  dtype: bfloat16
+model:
+  # Encoder (ResNet5)
+  dobs: 2           # Input channels
+  henc: 32          # Hidden dimension in encoder
+  dstc: 16          # Output representation dimension
+  # Predictor (ResUNet)
+  hpre: 32          # Hidden dimension in predictor
+  ctxtwind: 3       # Context window
+  # Action encoder
+  hactenc: 256
+  # Training
+  nsteps: 3         # Number of prediction steps during training
+  encoder_architecture: resnet
+  compile: false
+  regularizer:
+    cov_coeff: 8
+    std_coeff: 16 # 4.0
+    sim_coeff_t: 12 # 0.75 in PLDM
+    idm_coeff: 1
+    use_proj: false
+    idm_after_proj: false
+    spatial_as_samples: true
+    sim_t_after_proj: false
+optim:
+  epochs: 12
+  lr: 0.001
+  grad_clip_enc: 2.0
+  grad_clip_pred: 2.0
+  weight_decay: 1.e-5
+eval:
+  plan_cfg_path: examples/ac_video_jepa/cfgs/planning_mppi.yaml # eb_jepa/planning_mppi.yaml
+  eval_cfg_path: examples/ac_video_jepa/cfgs/eval.yaml
+
+# --- Parameters used when running with --full-sweep
+# By default, only the parameters specified above are used
+sweep:
+  # Sweep grid for AC video JEPA hyperparameter search
+  param_grid:
+    model.regularizer.cov_coeff: [8, 12]
+    model.regularizer.std_coeff: [8, 16]
+    model.regularizer.sim_coeff_t: [8, 12, 16]
+    model.regularizer.idm_coeff: [1, 2]
+    meta.seed: [1, 1000, 10000]

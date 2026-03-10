@@ -19,7 +19,7 @@ from eb_jepa.architectures import (
     Projector,
     ResNet5,
     ResUNet,
-    StateOnlyPredictor,
+    SimplePredictor,
 )
 from eb_jepa.datasets.moving_mnist import MovingMNISTDet
 from eb_jepa.image_decoder import ImageDecoder
@@ -129,7 +129,7 @@ def run(
     logger.info("Initializing model...")
     encoder = ResNet5(cfg.model.dobs, cfg.model.henc, cfg.model.dstc)
     predictor_model = ResUNet(2 * cfg.model.dstc, cfg.model.hpre, cfg.model.dstc)
-    predictor = StateOnlyPredictor(predictor_model, context_length=2)
+    predictor = SimplePredictor(predictor_model, context_length=2)
     projector = Projector(f"{cfg.model.dstc}-{cfg.model.dstc*4}-{cfg.model.dstc*4}")
     regularizer = VCLoss(cfg.loss.std_coeff, cfg.loss.cov_coeff, proj=projector)
     ploss = SquareLossSeq(projector)

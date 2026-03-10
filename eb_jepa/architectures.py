@@ -105,7 +105,12 @@ class ResNet5(TemporalBatchMixin, nn.Module):
 
 
 class SimplePredictor(nn.Module):
-    """Wrapper that concatenates states and actions channel-wise before prediction."""
+    """Wrapper that concatenates states and actions channel-wise before prediction.
+
+    The context window stacking (building the multi-frame buffer) is handled externally
+    in the unroll() method. This wrapper simply concatenates the pre-built state buffer
+    with the action buffer (if provided) before forwarding to the underlying predictor.
+    """
 
     def __init__(self, predictor, context_length):
         super().__init__()
@@ -114,18 +119,9 @@ class SimplePredictor(nn.Module):
         self.context_length = context_length
 
     def forward(self, x, a):
-        return self.predictor(torch.cat([x, a], dim=1))
-
-
-class StateOnlyPredictor(SimplePredictor):
-    """Wrapper for a simple predictor which concatenates states and actions channel wise."""
-
-    def forward(self, x, a):
-        # action not used on purpose
-        prev_state = x[:, :, :-1]  # [B, C, T-1, H, W]
-        next_state = x[:, :, 1:]  # [B, C, T-1, H, W]
-        combined_xa = torch.cat((prev_state, next_state), dim=1)
-        return self.predictor(combined_xa)
+        if a is not None:
+            return self.predictor(torch.cat([x, a], dim=1))
+        return self.predictor(x)
 
 
 class ResUNet(TemporalBatchMixin, nn.Module):
@@ -481,3 +477,42 @@ class InverseDynamicsModel(nn.Module):
         """
         combined_states = torch.cat([state_t, state_t_plus_1], dim=1)
         return self.model(combined_states)
+
+
+class ActionEncoder(nn.Module):
+    def __init__(self, dobs=2, hdim=256, dstc=16, hight=65, width=65):
+        super().__init__()
+
+        self.dobs = dobs
+        self.dstc = dstc
+        self.width = width
+        self.hight = hight
+        self.hdim = hdim
+
+        self.encoder = nn.Sequential(
+            nn.Linear(self.dobs, self.hdim),
+            nn.ReLU(),
+            nn.Linear(self.hdim, self.dstc * self.width * self.hight),
+        )
+
+    def forward(self, x):
+        # x shape: (6, 2, 17)
+
+        b, c, t = x.shape
+
+        # move encoding dimension to last
+        x = x.permute(0, 2, 1)  # (6,17,2)
+
+        # flatten untouched dimensions
+        x = x.reshape(-1, 2)  # (6*17,2)
+
+        # encode
+        x = self.encoder(x)  # (6*17, 16*65*65)
+
+        # reshape back
+        x = x.view(b, t, self.dstc, self.hight, self.width)  # (6,17,16,65,65)
+
+        # final desired order
+        x = x.permute(0, 2, 1, 3, 4)  # (6,16,17,65,65)
+
+        return x
