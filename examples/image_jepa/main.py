@@ -1,7 +1,7 @@
 """
 CIFAR-10 VICReg Training Script - Native PyTorch Implementation
 
-This script implements VICReg training on CIFAR-10 dataset using only PyTorch and torchvision.
+This script implements VICReg training on CIFAR-10/CIFAR-100 datasets using only PyTorch and torchvision.
 Supports both ResNet and Vision Transformer (ViT) backbones.
 
 Usage:
@@ -27,7 +27,7 @@ from omegaconf import OmegaConf
 from torch.amp import GradScaler, autocast
 from torch.optim.optimizer import required
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, CIFAR100
 from torchvision.models import VisionTransformer
 from tqdm import tqdm
 
@@ -339,7 +339,7 @@ def run(
     **overrides,
 ):
     """
-    Train an Image JEPA (VICReg/BCS) model on CIFAR-10.
+    Train an Image JEPA (VICReg/BCS) model on CIFAR-10/CIFAR-100.
 
     Args:
         fname: Path to YAML config file
@@ -387,21 +387,32 @@ def run(
         enabled=cfg.logging.log_wandb,
         sweep_id=cfg.logging.get("wandb_sweep_id"),
     )
+    
+    dataset_map = {
+        "cifar10": ("CIFAR-10", 10, CIFAR10),
+        "cifar100": ("CIFAR-100", 100, CIFAR100),
+    }
 
-    logger.info("Loading CIFAR-10 dataset...")
+    try:
+        dataset_name, num_classes, dataset_cls = dataset_map[cfg.data.dataset]
+    except KeyError:
+        raise ValueError(f"Unsupported dataset: {cfg.data.dataset}")
+
+    logger.info(f"Loading {dataset_name} dataset...")
     transform = get_train_transforms()
 
     # Use EBJEPA_DSETS environment variable if set, otherwise fall back to config
-    data_dir = os.environ.get("EBJEPA_DSETS")
-    logger.info(f"Using data directory: {data_dir}")
+    data_dir = os.environ.get("EBJEPA_DSETS", cfg.data.dir)
+    source = "EBJEPA_DSETS" if "EBJEPA_DSETS" in os.environ else "config"
+    logger.info(f"Using data directory from {source}: {data_dir}")
 
-    base_train_dataset = CIFAR10(
+    base_train_dataset = dataset_cls(
         root=data_dir, train=True, download=True, transform=None
     )
 
     train_dataset = ImageDataset(base_train_dataset, transform, num_crops=2)
 
-    val_dataset = CIFAR10(
+    val_dataset = dataset_cls(
         root=data_dir, train=False, download=True, transform=get_val_transforms()
     )
 
@@ -485,7 +496,7 @@ def run(
     log_config(cfg)
 
     # Initialize linear probe
-    linear_probe = LinearProbe(feature_dim=features_dim, num_classes=10).to(device)
+    linear_probe = LinearProbe(feature_dim=features_dim, num_classes=num_classes).to(device)
 
     # Mixed precision setup
     dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16}
