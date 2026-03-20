@@ -1,0 +1,37 @@
+meta:
+  seed: 42
+  device: auto
+
+data:
+  dataset: cifar10
+  batch_size: 128  # Reduced batch size for Colab
+  num_workers: 2   # Reduced workers for Colab
+
+model:
+  type: resnet
+  use_projector: true
+  proj_hidden_dim: 1024  # Reduced dimension for Colab
+  proj_output_dim: 1024  # Reduced dimension for Colab
+
+loss:
+  type: vicreg
+  std_coeff: 1.0
+  cov_coeff: 80.0
+
+optim:
+  epochs: 50       # Reduced epochs for demonstration
+  lr: 0.3
+  weight_decay: 1.0e-4
+  warmup_epochs: 5
+  warmup_start_lr: 3.0e-5
+  min_lr: 0.0
+
+logging:
+  log_wandb: false  # Disable wandb by default
+  log_every: 1
+  save_every: 10
+  tqdm_silent: false
+
+training:
+  use_amp: true
+  dtype: float16
