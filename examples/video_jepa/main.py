@@ -8,8 +8,10 @@ Joint Embedding Predictive Architecture (JEPA) with VC regularization.
 from pathlib import Path
 
 import fire
+import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
+from torch.amp import GradScaler, autocast
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -172,6 +174,13 @@ def run(
         start_epoch = ckpt_info.get("epoch", 0)
         global_step = ckpt_info.get("step", 0)
 
+    # Mixed precision setup
+    dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16}
+    use_amp = cfg.training.get("use_amp", True)
+    dtype = dtype_map.get(cfg.training.get("dtype", "float16").lower(), torch.float16)
+    scaler = GradScaler(device.type, enabled=use_amp)
+    logger.info(f"Using AMP with {dtype=}" if use_amp else f"AMP disabled")
+
     # Training loop
     logger.info(f"Starting training for {cfg.optim.epochs} epochs...")
 
@@ -188,20 +197,25 @@ def run(
             loc_map = batch["digit_location"]
 
             optimizer.zero_grad()
-            _, (jepa_loss, regl, _, regldict, pl) = jepa.unroll(
-                x,
-                actions=None,
-                nsteps=cfg.model.steps,
-                unroll_mode="parallel",
-                compute_loss=True,
-                return_all_steps=False,
-            )
-            recon_loss = pixel_decoder(x, x)
+            with autocast(device.type, enabled=use_amp, dtype=dtype):
+                _, (jepa_loss, regl, _, regldict, pl) = jepa.unroll(
+                    x,
+                    actions=None,
+                    nsteps=cfg.model.steps,
+                    unroll_mode="parallel",
+                    compute_loss=True,
+                    return_all_steps=False,
+                )
+                recon_loss = pixel_decoder(x, x)
+
+            # BCELoss (used by detection_head) is unsafe under autocast,
+            # so we compute det_loss outside the autocast block.
             det_loss = detection_head(x, loc_map)
             total_loss = jepa_loss + recon_loss + det_loss
 
-            total_loss.backward()
-            optimizer.step()
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             # Update progress bar
             pbar.set_postfix(
