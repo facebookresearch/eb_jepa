@@ -66,7 +66,7 @@ class ResNet18(nn.Module):
         self.backbone = torchvision.models.resnet18()
         self.backbone.fc = nn.Identity()  # Remove final classification layer
         self.backbone.conv1 = nn.Conv2d(
-            3, 64, kernel_size=3, stride=1, padding=2, bias=False
+            3, 64, kernel_size=3, stride=1, padding=1, bias=False
         )
         self.backbone.maxpool = nn.Identity()
         self.features_dim = 512
