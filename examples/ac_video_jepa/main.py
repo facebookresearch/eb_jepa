@@ -108,6 +108,7 @@ def run(
         enabled=cfg.logging.get("log_wandb", False),
         sweep_id=cfg.logging.get("wandb_sweep_id"),
     )
+    use_wandb = wandb_run is not None
 
     log_data_info(
         cfg.data.env_name,
@@ -136,6 +137,7 @@ def run(
         with open(cfg.eval.plan_cfg_path, "r") as f:
             plan_cfg = yaml.load(f, Loader=yaml.FullLoader)
         plan_cfg["logging"] = copy.deepcopy(dict(cfg.logging))
+        plan_cfg["logging"]["log_wandb"] = use_wandb
         with open(cfg.eval.eval_cfg_path, "r") as f:
             eval_cfg_dict = yaml.safe_load(f)
         _, _, env_config = init_data(
@@ -384,8 +386,8 @@ def run(
                 for loss_name, loss_value in regldict.items():
                     log_data[f"train/regl/{loss_name}"] = loss_value
 
-                if cfg.logging.get("log_wandb"):
-                    wandb.log(log_data, step=global_step)
+                if use_wandb:
+                    wandb_run.log(log_data, step=global_step)
 
             # Planning eval (only if eval is enabled)
             if (
@@ -406,8 +408,8 @@ def run(
                     plan_cfg=plan_cfg,
                 )
 
-                if cfg.logging.get("log_wandb"):
-                    wandb.log(eval_results, step=global_step)
+                if use_wandb:
+                    wandb_run.log(eval_results, step=global_step)
 
             # Light eval (only if eval is enabled)
             if (
@@ -427,8 +429,8 @@ def run(
                     cfg=cfg,
                 )
 
-                if cfg.logging.get("log_wandb"):
-                    wandb.log(eval_results, step=global_step)
+                if use_wandb:
+                    wandb_run.log(eval_results, step=global_step)
 
         epoch_time = time() - epoch_start_time
 
@@ -445,8 +447,8 @@ def run(
             elapsed_time=epoch_time,
         )
 
-        if cfg.logging.get("log_wandb"):
-            wandb.log(
+        if use_wandb:
+            wandb_run.log(
                 {"epoch": epoch, "epoch_time": epoch_time},
                 step=epoch * len(loader),
             )
