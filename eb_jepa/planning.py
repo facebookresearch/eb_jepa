@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from eb_jepa.logging import get_logger
+from eb_jepa.jepa import JEPA
 from eb_jepa.vis_utils import (
     analyze_distances,
     create_comparison_gif,
@@ -386,6 +387,7 @@ class GCAgent:
         self.goal_position = None
         self.goal_state_enc = None
         self._prev_losses = None
+        self._planning_state = None
 
     def set_goal(self, goal_state, goal_position=None):
         self.goal_position = goal_position
@@ -419,8 +421,12 @@ class GCAgent:
         """
         batch_size = actions.shape[0]
         nsteps = actions.shape[2]
-        if repeat_batch:
+        encoded_state = self._planning_state if repeat_batch else None
+        if encoded_state is not None:
+            encoded_state = encoded_state.expand(batch_size, *encoded_state.shape[1:])
+        elif repeat_batch:
             obs_init = obs_init.repeat(batch_size, 1, 1, 1, 1)
+        cached_kwargs = {'encoded_state': encoded_state} if encoded_state is not None else {}
         predicted_states, _ = self.model.unroll(
             obs_init,
             actions,
@@ -429,6 +435,7 @@ class GCAgent:
             ctxt_window_time=self.plan_cfg["ctxt_window_time"] if self.plan_cfg else 1,
             compute_loss=False,
             return_all_steps=False,
+            **cached_kwargs,
         )
         return predicted_states
 
@@ -451,13 +458,20 @@ class GCAgent:
         return frames
 
     def act(self, obs, steps_left=None, t0=False, plan_vis_path=None):
-        planning_result = self.planner.plan(
-            obs,
-            steps_left=steps_left,
-            eval_mode=True,
-            t0=t0,
-            plan_vis_path=plan_vis_path,
-        )
+        # Scope the cache to this observation and plan call, including all candidates
+        # and optimizer iterations. Training and standalone unroll remain unchanged.
+        try:
+            if isinstance(self.model, JEPA) and not self.model.training and obs.shape[0] == 1:
+                self._planning_state = self.model.encode(obs)
+            planning_result = self.planner.plan(
+                obs,
+                steps_left=steps_left,
+                eval_mode=True,
+                t0=t0,
+                plan_vis_path=plan_vis_path,
+            )
+        finally:
+            self._planning_state = None
         self._prev_losses = planning_result.losses
         self._prev_elite_losses_mean = planning_result.prev_elite_losses_mean
         self._prev_elite_losses_std = planning_result.prev_elite_losses_std

@@ -51,6 +51,7 @@ def init_data(env_name, cfg_data=None, **kwargs):
         pin_memory=pin_mem,
         drop_last=True,
         persistent_workers=persistent_workers,
+        **({"prefetch_factor": merged_cfg.get("prefetch_factor", 2)} if num_workers > 0 else {}),
     )
 
     val_dset = WallDataset(config=config)
@@ -58,10 +59,10 @@ def init_data(env_name, cfg_data=None, **kwargs):
         val_dset,
         batch_size=4,
         shuffle=False,
-        num_workers=num_workers,
+        num_workers=merged_cfg.get("val_num_workers", num_workers),
         pin_memory=pin_mem,
         drop_last=True,
-        persistent_workers=persistent_workers,
+        persistent_workers=persistent_workers and merged_cfg.get("val_num_workers", num_workers) > 0,
     )
 
     return loader, val_loader, config
