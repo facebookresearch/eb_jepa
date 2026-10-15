@@ -65,6 +65,7 @@ class JEPA(JEPAbase):
         ctxt_window_time=1,
         compute_loss=True,
         return_all_steps=False,
+        encoded_state=None,
     ):
         """Unified multi-step prediction with optional loss computation.
 
@@ -109,6 +110,8 @@ class JEPA(JEPAbase):
             compute_loss: Whether to compute losses (requires ground truth observations)
             return_all_steps: If True, return list of predictions at each step (like infern).
                 If False, return only the final predicted states.
+            encoded_state: Optional precomputed observation embeddings for inference.
+                When provided, skips the observation encoder; compute_loss must be False.
 
         Returns:
             Tuple of (predicted_states, losses) where:
@@ -119,7 +122,9 @@ class JEPA(JEPAbase):
             - losses: None if compute_loss=False, otherwise tuple of 5 elements:
               (total_loss, reg_loss, reg_loss_unweighted, reg_loss_dict, pred_loss)
         """
-        state = self.encoder(observations)
+        if encoded_state is not None and compute_loss:
+            raise ValueError('Precomputed embeddings are only supported with compute_loss=False')
+        state = self.encoder(observations) if encoded_state is None else encoded_state
         context_length = getattr(self.predictor, "context_length", 0)
 
         # Compute regularization loss if needed

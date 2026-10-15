@@ -25,9 +25,9 @@ dependencies = [
     "pudb>=2025.1",
     "scikit-learn>=1.7.0",
     "tiktoken>=0.9.0",
-    "torch==2.6.0",
+    "torch==2.7.1",
     "torchcodec>=0.4.0",
-    "torchvision",
+    "torchvision==0.22.1",
     "wandb[media]>=0.21.1",
     "gymnasium>=1.1.1",
     "imageio",
@@ -59,3 +59,12 @@ dev = [
     "pytest>=8.4.1",
     "autoflake",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
